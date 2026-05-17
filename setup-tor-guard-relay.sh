@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.4"
+VERSION="1.0.5"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -41,6 +41,7 @@ FIREWALL_STATE="unavailable"
 ENABLE_TOR_SANDBOX=1
 
 TORRC_PATH="/etc/tor/torrc"
+TOR_APT_BASE_URL="https://deb.torproject.org/torproject.org"
 TOR_SOURCES_PATH="/etc/apt/sources.list.d/tor.sources"
 TOR_KEYRING_PATH="/usr/share/keyrings/deb.torproject.org-keyring.gpg"
 UNATTENDED_TOR_PATH="/etc/apt/apt.conf.d/52tor-relay-unattended-upgrades"
@@ -116,8 +117,8 @@ Options:
   --version   Show the script version and exit.
 
 Supported targets:
-  Debian 12 (bookworm), Debian 13 (trixie)
-  Ubuntu 22.04 LTS (jammy), Ubuntu 24.04 LTS (noble)
+  Debian and Ubuntu releases whose codenames are published by the
+  official Tor Project apt repository.
 
 This script configures a non-exit relay only. It writes ExitRelay 0 and
 SocksPort 0, and it never enables exit relay behavior.
@@ -183,6 +184,71 @@ die() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+tor_project_suite_url() {
+  printf '%s/dists/%s/Release' "$TOR_APT_BASE_URL" "$OS_CODENAME"
+}
+
+check_tor_project_suite() {
+  local mode=${1:-required}
+  local url
+  local status
+
+  url=$(tor_project_suite_url)
+
+  if ((DRY_RUN)); then
+    info "Would verify official Tor Project apt suite: ${url}"
+    return 0
+  fi
+
+  if command_exists curl; then
+    status=$(curl -L -sS -o /dev/null -w '%{http_code}' --connect-timeout 10 --max-time 20 "$url" 2>/dev/null || true)
+    status=${status:-000}
+    case "$status" in
+      200)
+        success "Official Tor Project apt suite found for '${OS_CODENAME}'."
+        return 0
+        ;;
+      404)
+        die "The official Tor Project apt repository does not publish suite '${OS_CODENAME}' yet. Check ${TOR_APT_BASE_URL}/dists/ or use a supported Debian/Ubuntu release."
+        ;;
+      000)
+        if [[ "$mode" == "optional" ]]; then
+          warn "Could not verify the Tor Project apt suite yet; will retry before adding the Tor repository."
+          return 0
+        fi
+        die "Could not reach ${url}. Check DNS/network connectivity and retry."
+        ;;
+      *)
+        if [[ "$mode" == "optional" ]]; then
+          warn "Tor Project apt suite check returned HTTP ${status}; will retry before adding the Tor repository."
+          return 0
+        fi
+        die "Tor Project apt suite check returned unexpected HTTP ${status} for ${url}."
+        ;;
+    esac
+  fi
+
+  if command_exists wget; then
+    if wget -q --spider "$url"; then
+      success "Official Tor Project apt suite found for '${OS_CODENAME}'."
+      return 0
+    fi
+
+    if [[ "$mode" == "optional" ]]; then
+      warn "Could not verify the Tor Project apt suite yet; will retry before adding the Tor repository."
+      return 0
+    fi
+    die "Could not verify ${url}. Check whether the Tor Project apt repository publishes suite '${OS_CODENAME}'."
+  fi
+
+  if [[ "$mode" == "optional" ]]; then
+    warn "curl/wget is not available yet, so Tor Project apt suite verification is deferred."
+    return 0
+  fi
+
+  die "curl or wget is required to verify the Tor Project apt repository suite."
 }
 
 print_command() {
@@ -373,21 +439,14 @@ require_supported_system() {
     OS_CODENAME=$(lsb_release -cs)
   fi
 
-  local expected_codename=""
-  case "${OS_ID}:${OS_VERSION_ID}" in
-    debian:12) expected_codename="bookworm" ;;
-    debian:13) expected_codename="trixie" ;;
-    ubuntu:22.04) expected_codename="jammy" ;;
-    ubuntu:24.04) expected_codename="noble" ;;
+  case "$OS_ID" in
+    debian|ubuntu) ;;
     *)
-      die "Unsupported OS: ${OS_PRETTY_NAME}. Supported: Debian 12/13, Ubuntu 22.04/24.04."
+      die "Unsupported OS: ${OS_PRETTY_NAME}. This installer currently supports Debian and Ubuntu releases with a Tor Project apt repository suite."
       ;;
   esac
 
-  if [[ -n "$OS_CODENAME" && "$OS_CODENAME" != "$expected_codename" ]]; then
-    die "Detected ${OS_PRETTY_NAME}, but codename '${OS_CODENAME}' does not match expected '${expected_codename}'."
-  fi
-  OS_CODENAME=$expected_codename
+  [[ -n "$OS_CODENAME" ]] || die "Could not detect the Debian/Ubuntu codename for ${OS_PRETTY_NAME}."
 
   command_exists apt-get || die "apt-get is required."
   command_exists dpkg || die "dpkg is required."
@@ -401,7 +460,8 @@ require_supported_system() {
       ;;
   esac
 
-  success "Supported target: ${OS_PRETTY_NAME} (${OS_CODENAME}, ${ARCHITECTURE})"
+  success "Accepted target: ${OS_PRETTY_NAME} (${OS_CODENAME}, ${ARCHITECTURE})"
+  check_tor_project_suite optional
 
   if ((DRY_RUN)); then
     warn "Dry-run mode is active. No packages or system files will be changed."
@@ -821,7 +881,7 @@ build_tor_sources() {
   local output=$1
   {
     printf 'Types: deb deb-src\n'
-    printf 'URIs: https://deb.torproject.org/torproject.org/\n'
+    printf 'URIs: %s/\n' "$TOR_APT_BASE_URL"
     printf 'Suites: %s\n' "$OS_CODENAME"
     printf 'Components: main\n'
     printf 'Signed-By: %s\n' "$TOR_KEYRING_PATH"
@@ -1005,14 +1065,15 @@ configure_tor_repository() {
   local ascii_key="$TMP_DIR/torproject.asc"
   local binary_key="$TMP_DIR/deb.torproject.org-keyring.gpg"
 
+  check_tor_project_suite required
   build_tor_sources "$source_file"
 
   if ((DRY_RUN)); then
     info "Would fetch and install the Tor Project package signing key"
-    print_command wget -qO- "https://deb.torproject.org/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc"
+    print_command wget -qO- "${TOR_APT_BASE_URL}/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc"
     print_command gpg --dearmor --output "$TOR_KEYRING_PATH"
   else
-    wget -qO "$ascii_key" "https://deb.torproject.org/torproject.org/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc"
+    wget -qO "$ascii_key" "${TOR_APT_BASE_URL}/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc"
     gpg --dearmor --yes --output "$binary_key" "$ascii_key"
   fi
 

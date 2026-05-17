@@ -74,15 +74,19 @@ Show help:
 
 ## Supported Systems
 
-Primary targets:
+The installer supports Debian and Ubuntu releases when the official Tor Project apt repository publishes packages for that release codename.
+
+Known-good examples include:
 
 - Debian 12 `bookworm`
+- Debian 13 `trixie`
+- Debian `forky`
 - Ubuntu 22.04 LTS `jammy`
 - Ubuntu 24.04 LTS `noble`
+- Ubuntu `questing`
+- Ubuntu 26.04 LTS `resolute`
 
-Optional target:
-
-- Debian 13 `trixie`
+The script detects the OS codename from `/etc/os-release`, verifies that `https://deb.torproject.org/torproject.org/dists/<codename>/Release` exists, and then uses that codename for the Tor Project apt source.
 
 The script expects a systemd-based Debian-family VPS with `apt`, `dpkg`, and either `amd64` or `arm64`, matching the architectures currently provided by the Tor Project Debian package repository.
 

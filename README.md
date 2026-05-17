@@ -39,32 +39,34 @@ sudo ./setup-tor-guard-relay.sh
 Download and start it in one line:
 
 ```bash
-curl -fsSLo setup-tor-guard-relay.sh https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+curl -fsSLo setup-tor-guard-relay.sh "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
 ```
 
 With `wget` instead:
 
 ```bash
-wget -O setup-tor-guard-relay.sh https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+wget -O setup-tor-guard-relay.sh "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
 ```
 
 Direct pipe mode also works on fresh VPSes after you have reviewed the script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" | sudo bash
 ```
 
 With `wget` instead:
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh | sudo bash
+wget -qO- "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" | sudo bash
 ```
 
 Dry-run from the remote script:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh | bash -s -- --dry-run
+curl -fsSL "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" | bash -s -- --dry-run
 ```
+
+If GitHub's raw CDN ever serves an older copy, the `?$(date +%s)` part forces a fresh fetch. The startup banner also prints the script version.
 
 Show help:
 

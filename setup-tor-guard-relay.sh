@@ -158,6 +158,7 @@ banner() {
   ============================================================
 EOF
   printf '%b' "$RESET"
+  printf '  %s %s\n' "$SCRIPT_NAME" "$VERSION"
   printf '%s\n' "  This installer configures a public non-exit Tor relay."
   printf '%s\n\n' "  It will show a summary before making privileged changes."
 }

@@ -1,20 +1,38 @@
-# Tor Guard / Middle Relay Configuration Script
+# Tor Guard / Middle Relay Setup
 
-A polished interactive Bash installer for configuring a public **non-exit** Tor Guard / middle relay on a fresh Debian or Ubuntu VPS.
+<p align="center">
+  <img alt="Non-exit relay only" src="https://img.shields.io/badge/Tor-non--exit%20relay-7D4698?style=for-the-badge">
+  <img alt="Bash installer" src="https://img.shields.io/badge/Bash-interactive%20installer-1f425f?style=for-the-badge&logo=gnubash&logoColor=white">
+  <img alt="Debian and Ubuntu" src="https://img.shields.io/badge/Debian%20%2F%20Ubuntu-supported-a81d33?style=for-the-badge&logo=debian&logoColor=white">
+  <img alt="MIT license" src="https://img.shields.io/badge/License-MIT-2b9348?style=for-the-badge">
+</p>
 
-This repository intentionally does **not** configure an exit relay. The generated `torrc` writes `ExitRelay 0` and `SocksPort 0`, and the script never enables exit behavior.
-
-## Read This First
-
-Always review privileged scripts before running them on a server:
-
-```bash
-less setup-tor-guard-relay.sh
+```text
+  ============================================================
+       Tor Guard / Middle Relay Setup
+  ============================================================
+       A guided installer for a public non-exit relay
 ```
 
-Then run:
+This repo is a small, opinionated Bash installer for turning a fresh Debian or Ubuntu VPS into a public Tor Guard / middle relay. It is meant for the person who knows the basics, like a relay nickname, contact address, bandwidth expectations, and whether the server has IPv6, but does not want to hand-edit `torrc` at midnight.
+
+It is deliberately **non-exit only**. The generated config writes `ExitRelay 0` and `SocksPort 0`, and the script never enables exit relay behavior.
+
+## Status
+
+This is experimental software, but it works pretty well in real VPS testing so far. Treat it like a sharp tool: read it, run `--dry-run`, and only then let it touch a server.
+
+Implementation note: this repository was built solely by **Codex 5.5 xhigh** from the project requirements and test feedback. Human input supplied the goal, review direction, and live VPS logs; the implementation itself was generated and iterated by Codex.
+
+## Quick Start
+
+Clone it, review it, and run it:
 
 ```bash
+git clone https://github.com/ljkx/tor-relay-conf-script.git
+cd tor-relay-conf-script
+less setup-tor-guard-relay.sh
+./setup-tor-guard-relay.sh --dry-run
 sudo ./setup-tor-guard-relay.sh
 ```
 
@@ -30,7 +48,7 @@ With `wget` instead:
 wget -O setup-tor-guard-relay.sh https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
 ```
 
-Direct one-liner, useful on fresh VPSes after you have reviewed the script:
+Direct pipe mode also works on fresh VPSes after you have reviewed the script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh | sudo bash
@@ -42,19 +60,13 @@ With `wget` instead:
 wget -qO- https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh | sudo bash
 ```
 
-Preview the flow without making system changes:
-
-```bash
-./setup-tor-guard-relay.sh --dry-run
-```
-
 Dry-run from the remote script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh | bash -s -- --dry-run
 ```
 
-Show noninteractive help:
+Show help:
 
 ```bash
 ./setup-tor-guard-relay.sh --help
@@ -68,15 +80,15 @@ Primary targets:
 - Ubuntu 22.04 LTS `jammy`
 - Ubuntu 24.04 LTS `noble`
 
-Optional supported target:
+Optional target:
 
 - Debian 13 `trixie`
 
 The script expects a systemd-based Debian-family VPS with `apt`, `dpkg`, and either `amd64` or `arm64`, matching the architectures currently provided by the Tor Project Debian package repository.
 
-## What You Need To Know
+## What It Asks
 
-The script guides you through:
+The installer walks through the choices that actually matter:
 
 - Optional Linux system hostname change for fresh VPSes
 - Relay nickname
@@ -90,7 +102,9 @@ The script guides you through:
 - Basic hardening via Tor `SafeLogging 1` and optional `Sandbox 1`
 - Explicit confirmation that this is **not** an exit relay
 
-## What The Script Changes
+It shows a final summary before doing privileged work, then asks for confirmation again.
+
+## What It Changes
 
 When confirmed, the script:
 
@@ -140,6 +154,7 @@ Sandbox 1
 
 ## Security Notes
 
+- Always review privileged scripts before running them on a server.
 - `ContactInfo` is public. Use an address or contact string you are comfortable publishing.
 - This is a non-exit relay installer. It does not configure DNS resolver changes, exit policies, `IPv6Exit`, or `ExitRelay 1`.
 - Keep SSH access open. The script only adds an ORPort firewall allow rule; it does not enable an inactive firewall or change default policies.
@@ -155,7 +170,7 @@ Sandbox 1
 
 ## Relay Lifecycle
 
-New relays do not receive full traffic immediately.
+New relays do not receive full traffic immediately. This is normal, not a sign that the script failed.
 
 - Tor's post-install guidance says a new relay should appear in Relay Search after about 3 hours.
 - Traffic can be low for the first few days while bandwidth authorities measure the relay.

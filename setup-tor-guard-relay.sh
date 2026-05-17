@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.7"
+VERSION="1.0.8"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -186,6 +186,15 @@ die() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+apt_package_available() {
+  local package=$1
+  local candidate
+
+  command_exists apt-cache || return 1
+  candidate=$(apt-cache policy "$package" 2>/dev/null | awk '/Candidate:/ { print $2; exit }')
+  [[ -n "$candidate" && "$candidate" != "(none)" ]]
 }
 
 tor_project_suite_url() {
@@ -1047,7 +1056,8 @@ show_summary() {
     printf '  - Set the system hostname to %s and update /etc/hosts.\n' "$NEW_HOSTNAME"
   fi
   printf '  - Configure the official Tor Project apt repository for %s.\n' "$OS_CODENAME"
-  printf '  - Install tor and deb.torproject.org-keyring.\n'
+  printf '  - Install tor from apt.\n'
+  printf '  - Install deb.torproject.org-keyring if apt publishes it for %s.\n' "$OS_CODENAME"
   if ((INSTALL_NYX)); then
     printf '  - Install nyx for terminal relay monitoring.\n'
   fi
@@ -1108,8 +1118,20 @@ configure_tor_repository() {
 
 install_tor_package() {
   run "Updating apt package lists" env DEBIAN_FRONTEND=noninteractive apt-get update
-  run "Installing Tor from the Tor Project repository" \
-    env DEBIAN_FRONTEND=noninteractive apt-get install -y tor deb.torproject.org-keyring
+
+  if ! apt_package_available tor; then
+    die "The tor package is not available from apt after adding the Tor Project repository."
+  fi
+
+  run "Installing Tor from apt" env DEBIAN_FRONTEND=noninteractive apt-get install -y tor
+
+  if apt_package_available deb.torproject.org-keyring; then
+    run "Installing Tor Project keyring package" \
+      env DEBIAN_FRONTEND=noninteractive apt-get install -y deb.torproject.org-keyring
+  else
+    warn "deb.torproject.org-keyring is not available for '${OS_CODENAME}' yet."
+    warn "Continuing because the Tor Project signing key was already installed at ${TOR_KEYRING_PATH}."
+  fi
 }
 
 install_nyx_package() {

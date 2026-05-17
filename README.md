@@ -119,7 +119,8 @@ When confirmed, the script:
 - Optionally changes the Linux system hostname with `hostnamectl` and updates `/etc/hosts`.
 - Configures the official Tor Project apt repository in `/etc/apt/sources.list.d/tor.sources`.
 - Installs the Tor Project signing key at `/usr/share/keyrings/deb.torproject.org-keyring.gpg`.
-- Installs `tor` and `deb.torproject.org-keyring`.
+- Installs `tor`.
+- Installs `deb.torproject.org-keyring` when apt publishes it for the detected suite. New suites sometimes publish `tor` before the keyring package, so the script continues with the manually installed keyring file when needed.
 - Optionally installs `nyx` for terminal relay monitoring.
 - Backs up `/etc/tor/torrc` before replacing it with a non-exit relay configuration.
 - Optionally installs and configures `unattended-upgrades` for security and Tor updates.
@@ -253,7 +254,8 @@ Manual update:
 
 ```bash
 sudo apt update
-sudo apt install --only-upgrade tor deb.torproject.org-keyring
+sudo apt install --only-upgrade tor
+apt-cache policy deb.torproject.org-keyring
 sudo systemctl restart tor@default
 ```
 

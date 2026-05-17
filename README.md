@@ -168,7 +168,8 @@ Sandbox 1
 - This is a non-exit relay installer. It does not configure DNS resolver changes, exit policies, `IPv6Exit`, or `ExitRelay 1`.
 - Keep SSH access open. The script only adds an ORPort firewall allow rule; it does not enable an inactive firewall or change default policies.
 - Cloud firewalls are outside the VPS. Open the ORPort in your provider panel if required.
-- The IPv6 prompt's early connectivity check is outbound-only. Inbound ORPort reachability is checked only after the firewall rule is applied and Tor restarts.
+- The IPv6 prompt's early connectivity check is outbound-only and follows Tor's documented ping test against directory authority IPv6 addresses. Some networks make ICMPv6/ping awkward, so the script shows per-address results and lets an operator keep IPv6 enabled after manual verification.
+- Inbound ORPort reachability is checked only after the firewall rule is applied and Tor restarts.
 - The optional system hostname is local server identity only. It is separate from the public Tor relay `Nickname`.
 - Tor relay operators should keep Tor and the operating system updated.
 - Leave Tor logs at notice level and keep `SafeLogging` enabled unless debugging a specific issue.
@@ -234,7 +235,7 @@ Common issues:
 - `apt` reports `No space left on device`: the VPS filesystem or inode table is full. Check `df -h` and `df -ih`, then free space before re-running.
 - Provider firewall or security group does not allow inbound TCP ORPort.
 - Local firewall did not have a supported manager or ruleset.
-- IPv6 was enabled without working IPv6 connectivity.
+- IPv6 was enabled without working IPv6 connectivity. The early ping check is outbound ICMPv6; the later Tor self-test is the better signal for inbound ORPort reachability.
 - Port is already in use.
 - VPS does not have a public IPv4 address.
 

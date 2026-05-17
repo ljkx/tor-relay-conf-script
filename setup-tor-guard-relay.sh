@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.8"
+VERSION="1.0.9"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -569,7 +569,7 @@ list_ipv6_candidates() {
     | grep -v '^fe80:' || true
 }
 
-ipv6_connectivity_ok() {
+check_ipv6_connectivity() {
   local authorities=(
     "2001:858:2:2:aabb:0:563b:1526"
     "2620:13:4000:6000::1000:118"
@@ -579,20 +579,28 @@ ipv6_connectivity_ok() {
   )
   local ping_cmd=()
   local address
+  local failed=0
 
   if command_exists ping6; then
-    ping_cmd=(ping6 -c 2 -W 3)
+    ping_cmd=(ping6 -c 2)
   elif command_exists ping; then
-    ping_cmd=(ping -6 -c 2 -W 3)
+    ping_cmd=(ping -6 -c 2)
   else
+    warn "Neither ping6 nor ping is available; cannot run the Tor-documented IPv6 ping check."
     return 2
   fi
 
+  printf '%s\n' "Tor-documented check: ping each Tor directory authority IPv6 address from this server."
   for address in "${authorities[@]}"; do
-    "${ping_cmd[@]}" "$address" >/dev/null 2>&1 || return 1
+    if "${ping_cmd[@]}" "$address" >/dev/null 2>&1; then
+      success "IPv6 ping succeeded: ${address}"
+    else
+      warn "IPv6 ping failed: ${address}"
+      failed=1
+    fi
   done
 
-  return 0
+  return "$failed"
 }
 
 collect_relay_identity() {
@@ -683,12 +691,15 @@ collect_ipv6() {
   info "This early IPv6 check is outbound-only; inbound ORPort reachability is checked after the firewall rule and Tor restart."
   if ask_yes_no "Run the Tor-recommended outbound IPv6 connectivity check now?" "yes"; then
     info "Pinging Tor directory authority IPv6 addresses. This does not require TCP ${OR_PORT} to be open."
-    if ipv6_connectivity_ok; then
+    if check_ipv6_connectivity; then
       success "Outbound IPv6 connectivity check passed."
     else
       warn "Outbound IPv6 connectivity check failed or could not complete."
-      warn "Tor warns that enabling a broken IPv6 ORPort can leave the relay unused."
-      if ask_yes_no "Disable IPv6 ORPort for safety?" "yes"; then
+      warn "This test is ICMPv6/ping-based. It can fail even when inbound IPv6 ORPort reachability looks fine."
+      warn "Tor still warns that enabling IPv6 without working IPv6 connectivity can leave the relay unused."
+      if ask_yes_no "Keep IPv6 ORPort anyway because you verified IPv6 manually?" "no"; then
+        warn "Keeping IPv6 ORPort enabled by explicit operator override."
+      else
         ENABLE_IPV6=0
         IPV6_ADDRESS=""
       fi

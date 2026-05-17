@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.6"
+VERSION="1.0.7"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -711,12 +711,20 @@ check_path_capacity() {
   available_kib=$(available_kib_for_path "$path")
   available_inodes=$(available_inodes_for_path "$path")
 
-  if [[ -n "$available_kib" && "$available_kib" =~ ^[0-9]+$ && ((available_kib < min_kib)) ]]; then
-    die "Not enough free disk space for apt under ${path}. Need at least $((min_kib / 1024)) MiB free; found $((available_kib / 1024)) MiB. Run: df -h"
+  if [[ -n "$available_kib" && "$available_kib" =~ ^[0-9]+$ ]]; then
+    if ((available_kib < min_kib)); then
+      die "Not enough free disk space for apt under ${path}. Need at least $((min_kib / 1024)) MiB free; found $((available_kib / 1024)) MiB. Run: df -h"
+    fi
+  else
+    warn "Could not read free disk space for ${path}; continuing."
   fi
 
-  if [[ -n "$available_inodes" && "$available_inodes" =~ ^[0-9]+$ && ((available_inodes < min_inodes)) ]]; then
-    die "Not enough free inodes for apt under ${path}. Need at least ${min_inodes}; found ${available_inodes}. Run: df -ih"
+  if [[ -n "$available_inodes" && "$available_inodes" =~ ^[0-9]+$ ]]; then
+    if ((available_inodes < min_inodes)); then
+      die "Not enough free inodes for apt under ${path}. Need at least ${min_inodes}; found ${available_inodes}. Run: df -ih"
+    fi
+  else
+    warn "Could not read free inodes for ${path}; continuing."
   fi
 }
 
@@ -1266,8 +1274,8 @@ apply_changes() {
   section "Applying Changes"
   TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
 
-  configure_hostname
   check_apt_capacity
+  configure_hostname
   install_repository_prerequisites
   configure_tor_repository
   install_tor_package

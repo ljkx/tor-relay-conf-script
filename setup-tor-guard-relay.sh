@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.9"
+VERSION="1.1.0"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -29,6 +29,11 @@ CONTACT_INFO=""
 OR_PORT="9001"
 ENABLE_IPV6=0
 IPV6_ADDRESS=""
+RELAY_MODE="guard"
+EXIT_POLICY_MODE="reduced"
+EXIT_ALLOW_IPV6=0
+CONFIGURE_UNBOUND=0
+LOCK_RESOLV_CONF=0
 CONFIGURE_RELAY_BANDWIDTH=0
 RELAY_BANDWIDTH_RATE_MBITS=""
 RELAY_BANDWIDTH_BURST_MBITS=""
@@ -48,6 +53,7 @@ TOR_KEYRING_PATH="/usr/share/keyrings/deb.torproject.org-keyring.gpg"
 UNATTENDED_TOR_PATH="/etc/apt/apt.conf.d/52tor-relay-unattended-upgrades"
 AUTO_UPGRADES_PATH="/etc/apt/apt.conf.d/20auto-upgrades"
 TOR_SERVICE="tor@default"
+RESOLV_CONF_PATH="/etc/resolv.conf"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   BOLD=$'\033[1m'
@@ -103,8 +109,7 @@ print_help() {
   cat <<EOF
 ${SCRIPT_NAME} ${VERSION}
 
-Interactively configure a non-exit Tor Guard / middle relay on a fresh
-Debian or Ubuntu VPS.
+Interactively configure a Tor relay on a fresh Debian or Ubuntu VPS.
 
 Usage:
   ./${SCRIPT_NAME}
@@ -121,8 +126,8 @@ Supported targets:
   Debian and Ubuntu releases whose codenames are published by the
   official Tor Project apt repository.
 
-This script configures a non-exit relay only. It writes ExitRelay 0 and
-SocksPort 0, and it never enables exit relay behavior.
+This script can configure either a Guard/middle relay or an exit relay.
+It shows the generated torrc and asks for confirmation before applying.
 EOF
 }
 
@@ -154,12 +159,12 @@ banner() {
   printf '%b\n' "$CYAN"
   cat <<'EOF'
   ============================================================
-       Tor Guard / Middle Relay Setup
+       Tor Relay Setup
   ============================================================
 EOF
   printf '%b' "$RESET"
   printf '  %s %s\n' "$SCRIPT_NAME" "$VERSION"
-  printf '%s\n' "  This installer configures a public non-exit Tor relay."
+  printf '%s\n' "  This installer configures a public Tor relay."
   printf '%s\n\n' "  It will show a summary before making privileged changes."
 }
 
@@ -559,6 +564,18 @@ collect_system_hostname() {
   fi
 }
 
+collect_relay_mode() {
+  section "Relay Mode"
+  info "Guard/middle relays forward traffic inside the Tor network."
+  info "Exit relays also connect Tor traffic to destinations on the public Internet, according to an exit policy."
+
+  if ask_yes_no "Configure this relay as an exit relay?" "no"; then
+    RELAY_MODE="exit"
+  else
+    RELAY_MODE="guard"
+  fi
+}
+
 list_ipv6_candidates() {
   if ! command_exists ip; then
     return 0
@@ -634,12 +651,6 @@ collect_relay_identity() {
   if ((10#$OR_PORT < 1024)); then
     warn "Ports below 1024 can require extra privileges. The official guide often recommends 443 when it is available, but 9001 is common and simpler."
   fi
-
-  printf '\n'
-  warn "This installer is for a Guard / middle relay only. It will not configure an exit relay."
-  if ! ask_yes_no "Do you confirm this server is NOT intended to be an exit relay?" "no"; then
-    die "Aborted because exit relay intent was not rejected."
-  fi
 }
 
 collect_ipv6() {
@@ -706,6 +717,51 @@ collect_ipv6() {
     fi
   else
     warn "Skipped outbound IPv6 connectivity check. Only keep IPv6 enabled if you know it works."
+  fi
+}
+
+collect_exit_options() {
+  [[ "$RELAY_MODE" == "exit" ]] || return 0
+
+  section "Exit Relay Options"
+  info "Exit relay setup follows Tor's exit relay guidance: choose an exit policy and provide reliable local DNS resolution."
+  info "A dedicated server, provider permission, clear abuse contact handling, and useful reverse DNS/WHOIS notes are recommended for exit operators."
+
+  if ! ask_yes_no "Have you confirmed this provider allows Tor exit traffic and that abuse handling is planned?" "no"; then
+    if ! ask_yes_no "Continue configuring exit mode anyway?" "no"; then
+      die "Exit relay setup aborted. Re-run and choose Guard/middle mode if that is what you want."
+    fi
+  fi
+
+  if ask_yes_no "Use Tor's ReducedExitPolicy for a first exit relay?" "yes"; then
+    EXIT_POLICY_MODE="reduced"
+  else
+    EXIT_POLICY_MODE="default"
+    warn "Tor's default exit policy is broader than ReducedExitPolicy. Make sure it matches your provider and operations plan."
+  fi
+
+  if ((ENABLE_IPV6)); then
+    if ask_yes_no "Allow IPv6 exit traffic with IPv6Exit 1?" "yes"; then
+      EXIT_ALLOW_IPV6=1
+    else
+      EXIT_ALLOW_IPV6=0
+    fi
+  else
+    EXIT_ALLOW_IPV6=0
+  fi
+
+  info "Exit relays perform DNS resolution for Tor clients."
+  info "Tor recommends a local caching, DNSSEC-validating resolver such as Unbound, without public DNS forwarders."
+  if ask_yes_no "Install Unbound and use it as the local resolver for exit DNS?" "yes"; then
+    CONFIGURE_UNBOUND=1
+    if ask_yes_no "Lock /etc/resolv.conf with chattr +i after switching to Unbound?" "no"; then
+      LOCK_RESOLV_CONF=1
+    else
+      LOCK_RESOLV_CONF=0
+    fi
+  else
+    CONFIGURE_UNBOUND=0
+    warn "You chose not to configure Unbound. Make sure DNS resolution is reliable and not using a large public resolver."
   fi
 }
 
@@ -880,7 +936,7 @@ build_torrc() {
   local output=$1
   {
     printf '# Generated by %s on %s UTC.\n' "$SCRIPT_NAME" "$(date -u '+%Y-%m-%d %H:%M:%S')"
-    printf '# Non-exit Tor Guard / middle relay configuration.\n'
+    printf '# Tor relay configuration.\n'
     printf '# Review Tor Project relay documentation before making manual changes.\n'
     printf '\n'
     printf 'Nickname %s\n' "$RELAY_NICKNAME"
@@ -890,9 +946,22 @@ build_torrc() {
       printf 'ORPort [%s]:%s\n' "$IPV6_ADDRESS" "$OR_PORT"
     fi
     printf '\n'
-    printf '# This script configures a non-exit relay only.\n'
-    printf 'ExitRelay 0\n'
+    printf '# Disable local SOCKS listener on this relay-only server.\n'
     printf 'SocksPort 0\n'
+    printf '\n'
+    if [[ "$RELAY_MODE" == "exit" ]]; then
+      printf '# Exit relay mode.\n'
+      printf 'ExitRelay 1\n'
+      if [[ "$EXIT_POLICY_MODE" == "reduced" ]]; then
+        printf 'ReducedExitPolicy 1\n'
+      fi
+      if ((EXIT_ALLOW_IPV6)); then
+        printf 'IPv6Exit 1\n'
+      fi
+    else
+      printf '# Guard / middle relay mode.\n'
+      printf 'ExitRelay 0\n'
+    fi
     printf '\n'
     printf '# Keep potentially sensitive log details scrubbed.\n'
     printf 'SafeLogging 1\n'
@@ -988,6 +1057,14 @@ build_hosts_file() {
   fi
 }
 
+build_resolv_conf() {
+  local output=$1
+  {
+    printf '# Managed by %s for Tor exit relay DNS.\n' "$SCRIPT_NAME"
+    printf 'nameserver 127.0.0.1\n'
+  } > "$output"
+}
+
 backup_file() {
   local target=$1
   local backup
@@ -1035,6 +1112,17 @@ show_summary() {
   else
     printf '%bSystem hostname%b: unchanged (%s)\n' "$BOLD" "$RESET" "$CURRENT_HOSTNAME"
   fi
+  if [[ "$RELAY_MODE" == "exit" ]]; then
+    printf '%bRelay mode%b: Exit\n' "$BOLD" "$RESET"
+    printf '%bExit policy%b: %s\n' "$BOLD" "$RESET" "$EXIT_POLICY_MODE"
+    printf '%bIPv6 exit traffic%b: %s\n' "$BOLD" "$RESET" "$([[ $EXIT_ALLOW_IPV6 -eq 1 ]] && printf yes || printf no)"
+    printf '%bLocal Unbound resolver%b: %s\n' "$BOLD" "$RESET" "$([[ $CONFIGURE_UNBOUND -eq 1 ]] && printf yes || printf no)"
+    if ((CONFIGURE_UNBOUND)); then
+      printf '%bLock %s%b: %s\n' "$BOLD" "$RESOLV_CONF_PATH" "$RESET" "$([[ $LOCK_RESOLV_CONF -eq 1 ]] && printf yes || printf no)"
+    fi
+  else
+    printf '%bRelay mode%b: Guard / middle\n' "$BOLD" "$RESET"
+  fi
   printf '%bRelay%b: %s on ORPort %s\n' "$BOLD" "$RESET" "$RELAY_NICKNAME" "$OR_PORT"
   printf '%bContactInfo%b: %s\n' "$BOLD" "$RESET" "$CONTACT_INFO"
   if ((ENABLE_IPV6)); then
@@ -1072,6 +1160,12 @@ show_summary() {
   if ((INSTALL_NYX)); then
     printf '  - Install nyx for terminal relay monitoring.\n'
   fi
+  if [[ "$RELAY_MODE" == "exit" && "$CONFIGURE_UNBOUND" -eq 1 ]]; then
+    printf '  - Install Unbound and switch %s to the local resolver.\n' "$RESOLV_CONF_PATH"
+    if ((LOCK_RESOLV_CONF)); then
+      printf '  - Lock %s with chattr +i.\n' "$RESOLV_CONF_PATH"
+    fi
+  fi
   printf '  - Back up and update %s.\n' "$TORRC_PATH"
   if ((ENABLE_AUTO_UPDATES)); then
     printf '  - Configure unattended upgrades for security and Tor packages.\n'
@@ -1086,13 +1180,6 @@ confirm_apply() {
   printf '\n'
   if ! ask_yes_no "Apply these changes now?" "no"; then
     die "Aborted before making changes."
-  fi
-
-  prompt_printf '%bType NON-EXIT to confirm this must remain a non-exit relay%b: ' "$BOLD" "$RESET"
-  local confirmation
-  read_reply confirmation
-  if [[ "$confirmation" != "NON-EXIT" ]]; then
-    die "Confirmation did not match NON-EXIT. Aborted."
   fi
 }
 
@@ -1149,6 +1236,56 @@ install_nyx_package() {
   ((INSTALL_NYX)) || return 0
 
   run "Installing Nyx relay monitor" env DEBIAN_FRONTEND=noninteractive apt-get install -y nyx
+}
+
+configure_exit_dns() {
+  local resolv_file="$TMP_DIR/resolv.conf"
+  local resolv_backup="${RESOLV_CONF_PATH}.bak.${TIMESTAMP}"
+
+  [[ "$RELAY_MODE" == "exit" && "$CONFIGURE_UNBOUND" -eq 1 ]] || return 0
+
+  build_resolv_conf "$resolv_file"
+
+  run "Installing Unbound local resolver" env DEBIAN_FRONTEND=noninteractive apt-get install -y unbound
+  run "Enabling and starting Unbound" systemctl enable --now unbound
+
+  if ((DRY_RUN)); then
+    info "Would verify Unbound service state and switch ${RESOLV_CONF_PATH} to nameserver 127.0.0.1"
+    return 0
+  fi
+
+  if systemctl is-active --quiet unbound; then
+    success "Unbound is active."
+  else
+    die "Unbound is not active. Check: journalctl -u unbound -n 100 --no-pager"
+  fi
+
+  backup_file "$RESOLV_CONF_PATH"
+  if [[ -L "$RESOLV_CONF_PATH" ]]; then
+    unlink "$RESOLV_CONF_PATH"
+  fi
+  install -m 0644 "$resolv_file" "$RESOLV_CONF_PATH"
+  success "Configured ${RESOLV_CONF_PATH} to use local Unbound."
+
+  if getent hosts deb.torproject.org >/dev/null 2>&1; then
+    success "DNS resolution works through local resolver."
+  else
+    warn "DNS resolution failed after switching to local Unbound."
+    if [[ -e "$resolv_backup" || -L "$resolv_backup" ]]; then
+      rm -f -- "$RESOLV_CONF_PATH"
+      cp -a -- "$resolv_backup" "$RESOLV_CONF_PATH"
+      warn "Restored ${RESOLV_CONF_PATH} from ${resolv_backup}."
+    fi
+    die "Fix Unbound/DNS before running an exit relay."
+  fi
+
+  if ((LOCK_RESOLV_CONF)); then
+    if command_exists chattr; then
+      run "Locking ${RESOLV_CONF_PATH} with chattr +i" chattr +i "$RESOLV_CONF_PATH"
+    else
+      warn "chattr is not available; ${RESOLV_CONF_PATH} was not locked."
+    fi
+  fi
 }
 
 configure_unattended_upgrades() {
@@ -1313,6 +1450,7 @@ apply_changes() {
   configure_tor_repository
   install_tor_package
   install_nyx_package
+  configure_exit_dns
 
   if ((ENABLE_AUTO_UPDATES)); then
     configure_unattended_upgrades
@@ -1341,6 +1479,10 @@ print_next_steps() {
   if ((INSTALL_NYX)); then
     printf '  sudo -u debian-tor nyx\n'
   fi
+  if [[ "$RELAY_MODE" == "exit" && "$CONFIGURE_UNBOUND" -eq 1 ]]; then
+    printf '  systemctl status unbound --no-pager\n'
+    printf '  getent hosts deb.torproject.org\n'
+  fi
   printf '\n%s\n' "Relay Search usually shows a new relay after about 3 hours:"
   printf '  https://metrics.torproject.org/rs.html#search/%s\n' "$RELAY_NICKNAME"
   printf '\n%s\n' "Remember:"
@@ -1348,6 +1490,9 @@ print_next_steps() {
   printf '  - New relays ramp up gradually; Guard usage can take time and stable uptime.\n'
   printf '  - If you run multiple relays, configure MyFamily manually after you know their fingerprints.\n'
   printf '  - Consider backing up /var/lib/tor/keys after the relay is running.\n'
+  if [[ "$RELAY_MODE" == "exit" ]]; then
+    printf '  - Keep provider, reverse DNS/WHOIS, and abuse-contact handling aligned with exit operation.\n'
+  fi
 
   if ((${#BACKUPS_CREATED[@]})); then
     printf '\n%s\n' "Backups created:"
@@ -1365,8 +1510,10 @@ main() {
   banner
   require_supported_system
   collect_system_hostname
+  collect_relay_mode
   collect_relay_identity
   collect_ipv6
+  collect_exit_options
   collect_bandwidth
   collect_maintenance_options
   show_summary

@@ -1,7 +1,7 @@
-# Tor Guard / Middle Relay Setup
+# Tor Relay Setup
 
 <p align="center">
-  <img alt="Non-exit relay only" src="https://img.shields.io/badge/Tor-non--exit%20relay-7D4698?style=for-the-badge">
+  <img alt="Tor relay modes" src="https://img.shields.io/badge/Tor-guard%20%2F%20exit%20relay-7D4698?style=for-the-badge">
   <img alt="Bash installer" src="https://img.shields.io/badge/Bash-interactive%20installer-1f425f?style=for-the-badge&logo=gnubash&logoColor=white">
   <img alt="Debian and Ubuntu" src="https://img.shields.io/badge/Debian%20%2F%20Ubuntu-supported-a81d33?style=for-the-badge&logo=debian&logoColor=white">
   <img alt="MIT license" src="https://img.shields.io/badge/License-MIT-2b9348?style=for-the-badge">
@@ -9,14 +9,12 @@
 
 ```text
   ============================================================
-       Tor Guard / Middle Relay Setup
+       Tor Relay Setup
   ============================================================
-       A guided installer for a public non-exit relay
+       A guided installer for public Tor relays
 ```
 
-This repo is a small, opinionated Bash installer for turning a fresh Debian or Ubuntu VPS into a public Tor Guard / middle relay. It is meant for the person who knows the basics, like a relay nickname, contact address, bandwidth expectations, and whether the server has IPv6, but does not want to hand-edit `torrc` at midnight.
-
-It is deliberately **non-exit only**. The generated config writes `ExitRelay 0` and `SocksPort 0`, and the script never enables exit relay behavior.
+This repo is a small, opinionated Bash installer for turning a fresh Debian or Ubuntu VPS into a public Tor relay. It can configure a Guard/middle relay or, when you intentionally choose it, an exit relay with the Tor Project's recommended exit basics. It is meant for the person who knows the practical details, like a relay nickname, contact address, bandwidth expectations, whether the server has IPv6, and whether this VPS is supposed to exit traffic, but does not want to hand-edit `torrc` at midnight.
 
 ## Status
 
@@ -97,17 +95,18 @@ The script expects a systemd-based Debian-family VPS with `apt`, `dpkg`, and eit
 The installer walks through the choices that actually matter:
 
 - Optional Linux system hostname change for fresh VPSes
+- Relay mode: Guard/middle or exit
 - Relay nickname
 - Public `ContactInfo` email or contact string
 - ORPort, default `9001`
 - Optional IPv6 ORPort
+- Exit relay options when exit mode is selected: provider readiness, reduced or default exit policy, optional IPv6 exiting, and local Unbound DNS setup
 - Optional `RelayBandwidthRate` / `RelayBandwidthBurst`
 - Optional monthly `AccountingMax`
 - Automatic package updates
 - Optional Nyx install for terminal relay monitoring
 - Firewall rule management when a supported firewall is detected
 - Basic hardening via Tor `SafeLogging 1` and optional `Sandbox 1`
-- Explicit confirmation that this is **not** an exit relay
 
 It shows a final summary before doing privileged work, then asks for confirmation again.
 
@@ -122,7 +121,11 @@ When confirmed, the script:
 - Installs `tor`.
 - Installs `deb.torproject.org-keyring` when apt publishes it for the detected suite. New suites sometimes publish `tor` before the keyring package, so the script continues with the manually installed keyring file when needed.
 - Optionally installs `nyx` for terminal relay monitoring.
-- Backs up `/etc/tor/torrc` before replacing it with a non-exit relay configuration.
+- Backs up `/etc/tor/torrc` before replacing it with the generated relay configuration.
+- Writes `ExitRelay 0` for Guard/middle mode.
+- Writes `ExitRelay 1` for exit mode, with `ReducedExitPolicy 1` by default unless you choose Tor's broader default exit policy.
+- Optionally writes `IPv6Exit 1` when exit mode and IPv6 ORPort are both selected.
+- Optionally installs and starts `unbound` for exit relay DNS, backs up `/etc/resolv.conf`, and points the system resolver at `127.0.0.1`.
 - Optionally installs and configures `unattended-upgrades` for security and Tor updates.
 - Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
 - Enables and restarts `tor@default`.
@@ -139,14 +142,26 @@ When the optional hostname change is selected, `/etc/hostname` and `/etc/hosts` 
 
 ## Generated torrc Shape
 
-The generated configuration follows the Tor Project's Middle/Guard relay guidance:
+Guard/middle mode follows the Tor Project's Middle/Guard relay guidance:
 
 ```torrc
 Nickname MyRelay
 ContactInfo "operator@example.org"
 ORPort 9001
-ExitRelay 0
 SocksPort 0
+ExitRelay 0
+SafeLogging 1
+```
+
+Exit mode uses Tor's exit relay guidance and defaults to the reduced exit policy for a first exit:
+
+```torrc
+Nickname MyExit
+ContactInfo "operator@example.org"
+ORPort 9001
+SocksPort 0
+ExitRelay 1
+ReducedExitPolicy 1
 SafeLogging 1
 ```
 
@@ -154,6 +169,7 @@ Optional settings are added only when selected, such as:
 
 ```torrc
 ORPort [2001:db8::1234]:9001
+IPv6Exit 1
 RelayBandwidthRate 16 MBits
 RelayBandwidthBurst 32 MBits
 AccountingStart month 1 00:00
@@ -165,7 +181,10 @@ Sandbox 1
 
 - Always review privileged scripts before running them on a server.
 - `ContactInfo` is public. Use an address or contact string you are comfortable publishing.
-- This is a non-exit relay installer. It does not configure DNS resolver changes, exit policies, `IPv6Exit`, or `ExitRelay 1`.
+- Guard/middle mode writes `ExitRelay 0`; exit mode writes `ExitRelay 1` and the exit policy you selected.
+- Exit relays need more operational care than Guard/middle relays. Use a provider that allows exit traffic, plan abuse handling, and consider reverse DNS / WHOIS notes that clearly identify the server as a Tor exit.
+- For exit mode, the script can install Unbound and switch `/etc/resolv.conf` to `nameserver 127.0.0.1`, matching Tor's Debian/Ubuntu exit relay DNS guidance. It backs up the old resolver config first.
+- The optional `/etc/resolv.conf` lock uses `chattr +i`. That can be useful on VPSes where DHCP keeps rewriting DNS, but you must unlock it manually with `sudo chattr -i /etc/resolv.conf` before future resolver changes.
 - Keep SSH access open. The script only adds an ORPort firewall allow rule; it does not enable an inactive firewall or change default policies.
 - Cloud firewalls are outside the VPS. Open the ORPort in your provider panel if required.
 - The IPv6 prompt's early connectivity check is outbound-only and follows Tor's documented ping test against directory authority IPv6 addresses. Some networks make ICMPv6/ping awkward, so the script shows per-address results and lets an operator keep IPv6 enabled after manual verification.
@@ -224,6 +243,14 @@ Open Nyx if you installed it:
 sudo -u debian-tor nyx
 ```
 
+Check Unbound on an exit relay:
+
+```bash
+systemctl status unbound --no-pager
+getent hosts deb.torproject.org
+cat /etc/resolv.conf
+```
+
 Verify the Tor config manually:
 
 ```bash
@@ -238,6 +265,8 @@ Common issues:
 - IPv6 was enabled without working IPv6 connectivity. The early ping check is outbound ICMPv6; the later Tor self-test is the better signal for inbound ORPort reachability.
 - Port is already in use.
 - VPS does not have a public IPv4 address.
+- Exit mode was selected on a provider that blocks exit traffic or outbound DNS.
+- `/etc/resolv.conf` was locked with `chattr +i` and needs to be unlocked before changing DNS again.
 
 If an earlier package operation was interrupted by a full disk, clear the apt cache and retry after freeing space:
 
@@ -245,6 +274,13 @@ If an earlier package operation was interrupted by a full disk, clear the apt ca
 sudo apt clean
 sudo rm -rf /var/lib/apt/lists/partial/*
 sudo apt update
+```
+
+Restore an earlier resolver backup if you experimented with exit DNS and need to roll back:
+
+```bash
+sudo chattr -i /etc/resolv.conf 2>/dev/null || true
+sudo cp -a /etc/resolv.conf.bak.YYYYMMDDTHHMMSSZ /etc/resolv.conf
 ```
 
 ## Updating
@@ -274,6 +310,14 @@ Remove packages if you no longer want Tor installed:
 sudo apt remove tor
 ```
 
+If you installed Unbound only for exit relay DNS and no longer need it:
+
+```bash
+sudo chattr -i /etc/resolv.conf 2>/dev/null || true
+sudo systemctl disable --now unbound
+sudo apt remove unbound
+```
+
 Optional cleanup:
 
 ```bash
@@ -294,6 +338,9 @@ This script was built from current official Tor documentation, including:
 
 - [Tor relay technical setup](https://community.torproject.org/relay/setup/)
 - [Debian/Ubuntu Middle/Guard relay setup](https://community.torproject.org/relay/setup/guard/debian-ubuntu/)
+- [Types of relays on the Tor network](https://community.torproject.org/relay/types-of-relays/)
+- [Exit relay setup](https://community.torproject.org/relay/setup/exit/)
+- [Debian/Ubuntu exit relay DNS setup](https://community.torproject.org/relay/setup/exit/debian-ubuntu/)
 - [Tor Debian/Ubuntu package installation](https://support.torproject.org/little-t-tor/getting-started/installing/)
 - [Relay post-install and good practices](https://community.torproject.org/relay/setup/post-install/)
 - [Relay requirements](https://community.torproject.org/relay/relays-requirements/)

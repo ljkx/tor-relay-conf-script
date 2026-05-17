@@ -18,10 +18,40 @@ Then run:
 sudo ./setup-tor-guard-relay.sh
 ```
 
+Download and start it in one line:
+
+```bash
+curl -fsSLo setup-tor-guard-relay.sh https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+```
+
+With `wget` instead:
+
+```bash
+wget -O setup-tor-guard-relay.sh https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+```
+
+Direct one-liner, useful on fresh VPSes after you have reviewed the script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh | sudo bash
+```
+
+With `wget` instead:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh | sudo bash
+```
+
 Preview the flow without making system changes:
 
 ```bash
 ./setup-tor-guard-relay.sh --dry-run
+```
+
+Dry-run from the remote script:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh | bash -s -- --dry-run
 ```
 
 Show noninteractive help:

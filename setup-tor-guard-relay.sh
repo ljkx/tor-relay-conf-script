@@ -2,7 +2,12 @@
 set -Eeuo pipefail
 
 SCRIPT_NAME="${0##*/}"
-VERSION="1.0.0"
+case "$SCRIPT_NAME" in
+  bash|sh|dash|bash.exe|sh.exe|dash.exe)
+    SCRIPT_NAME="setup-tor-guard-relay.sh"
+    ;;
+esac
+VERSION="1.0.1"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -208,16 +213,45 @@ prompt_line() {
   local reply
 
   if [[ -n "$default_value" ]]; then
-    printf '%b%s%b [%s]: ' "$BOLD" "$prompt" "$RESET" "$default_value"
+    prompt_printf '%b%s%b [%s]: ' "$BOLD" "$prompt" "$RESET" "$default_value"
   else
-    printf '%b%s%b: ' "$BOLD" "$prompt" "$RESET"
+    prompt_printf '%b%s%b: ' "$BOLD" "$prompt" "$RESET"
   fi
 
-  IFS= read -r reply
+  read_reply reply
   if [[ -z "$reply" && -n "$default_value" ]]; then
     reply=$default_value
   fi
   trim "$reply"
+}
+
+prompt_printf() {
+  local format=$1
+  shift
+
+  if [[ -w /dev/tty ]]; then
+    # shellcheck disable=SC2059
+    printf "$format" "$@" > /dev/tty
+  else
+    # shellcheck disable=SC2059
+    printf "$format" "$@" >&2
+  fi
+}
+
+read_reply() {
+  local variable_name=$1
+
+  if [[ -r /dev/tty ]]; then
+    if ! IFS= read -r "$variable_name" < /dev/tty; then
+      die "No input received from the terminal."
+    fi
+  elif [[ -t 0 ]]; then
+    if ! IFS= read -r "$variable_name"; then
+      die "No input received from stdin."
+    fi
+  else
+    die "Interactive input is required. Run from a terminal, or use --help for noninteractive usage."
+  fi
 }
 
 ask_yes_no() {
@@ -233,8 +267,8 @@ ask_yes_no() {
   esac
 
   while true; do
-    printf '%b%s%b %s: ' "$BOLD" "$prompt" "$RESET" "$suffix"
-    IFS= read -r reply
+    prompt_printf '%b%s%b %s: ' "$BOLD" "$prompt" "$RESET" "$suffix"
+    read_reply reply
     reply=$(trim "$reply")
     reply=${reply,,}
 
@@ -775,9 +809,9 @@ confirm_apply() {
     die "Aborted before making changes."
   fi
 
-  printf '%bType NON-EXIT to confirm this must remain a non-exit relay%b: ' "$BOLD" "$RESET"
+  prompt_printf '%bType NON-EXIT to confirm this must remain a non-exit relay%b: ' "$BOLD" "$RESET"
   local confirmation
-  IFS= read -r confirmation
+  read_reply confirmation
   if [[ "$confirmation" != "NON-EXIT" ]]; then
     die "Confirmation did not match NON-EXIT. Aborted."
   fi

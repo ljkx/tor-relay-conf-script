@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.3"
+VERSION="1.0.4"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -19,6 +19,10 @@ OS_VERSION_ID=""
 OS_CODENAME=""
 OS_PRETTY_NAME=""
 ARCHITECTURE=""
+
+CHANGE_HOSTNAME=0
+CURRENT_HOSTNAME=""
+NEW_HOSTNAME=""
 
 RELAY_NICKNAME=""
 CONTACT_INFO=""
@@ -318,6 +322,24 @@ valid_contact_info() {
   [[ "$value" != *"#"* ]] || return 1
 }
 
+valid_system_hostname() {
+  local value=$1
+  local label
+  local lower_value=${value,,}
+  local -a labels
+
+  [[ -n "$value" && ${#value} -le 253 ]] || return 1
+  [[ "$value" =~ ^[A-Za-z0-9.-]+$ ]] || return 1
+  [[ "$value" != .* && "$value" != *. && "$value" != *..* ]] || return 1
+  [[ "$lower_value" != "localhost" && "$lower_value" != "localhost.localdomain" ]] || return 1
+
+  IFS='.' read -r -a labels <<< "$value"
+  for label in "${labels[@]}"; do
+    [[ -n "$label" && ${#label} -le 63 ]] || return 1
+    [[ "$label" =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] || return 1
+  done
+}
+
 valid_ipv6_address() {
   local value=$1
   [[ "$value" == *:* ]] || return 1
@@ -422,6 +444,47 @@ detect_firewall() {
       FIREWALL_KIND="nftables"
       FIREWALL_STATE="no supported inet filter input chain"
     fi
+  fi
+}
+
+collect_system_hostname() {
+  section "System Hostname"
+
+  if command_exists hostnamectl; then
+    CURRENT_HOSTNAME=$(hostnamectl --static 2>/dev/null || true)
+  fi
+  if [[ -z "$CURRENT_HOSTNAME" ]] && command_exists hostname; then
+    CURRENT_HOSTNAME=$(hostname 2>/dev/null || true)
+  fi
+  CURRENT_HOSTNAME=${CURRENT_HOSTNAME:-unknown}
+
+  info "Current system hostname: ${CURRENT_HOSTNAME}"
+  info "This is the Linux server name, not your public Tor relay nickname."
+
+  if ! command_exists hostnamectl; then
+    warn "hostnamectl is not available, so this installer will not change the system hostname."
+    CHANGE_HOSTNAME=0
+    return 0
+  fi
+
+  if ! ask_yes_no "Change the system hostname before configuring Tor?" "no"; then
+    CHANGE_HOSTNAME=0
+    return 0
+  fi
+
+  while true; do
+    NEW_HOSTNAME=$(prompt_line "New system hostname" "$CURRENT_HOSTNAME")
+    if valid_system_hostname "$NEW_HOSTNAME"; then
+      break
+    fi
+    warn "Use DNS-style hostname labels: letters, numbers, hyphens, and dots; no spaces or underscores."
+  done
+
+  if [[ "$NEW_HOSTNAME" == "$CURRENT_HOSTNAME" ]]; then
+    success "System hostname will stay unchanged."
+    CHANGE_HOSTNAME=0
+  else
+    CHANGE_HOSTNAME=1
   fi
 }
 
@@ -795,6 +858,39 @@ build_auto_upgrades_config() {
   } > "$output"
 }
 
+build_hosts_file() {
+  local output=$1
+  local hosts_entry=$NEW_HOSTNAME
+
+  if [[ "$NEW_HOSTNAME" == *.* ]]; then
+    hosts_entry="${NEW_HOSTNAME} ${NEW_HOSTNAME%%.*}"
+  fi
+
+  if [[ -r /etc/hosts ]]; then
+    awk -v hosts_entry="$hosts_entry" '
+      BEGIN { updated = 0 }
+      $1 == "127.0.1.1" && updated == 0 {
+        print "127.0.1.1\t" hosts_entry
+        updated = 1
+        next
+      }
+      $1 == "127.0.1.1" { next }
+      { print }
+      END {
+        if (updated == 0) {
+          print "127.0.1.1\t" hosts_entry
+        }
+      }
+    ' /etc/hosts > "$output"
+  else
+    {
+      printf '127.0.0.1\tlocalhost\n'
+      printf '127.0.1.1\t%s\n' "$hosts_entry"
+      printf '::1\tlocalhost ip6-localhost ip6-loopback\n'
+    } > "$output"
+  fi
+}
+
 backup_file() {
   local target=$1
   local backup
@@ -837,6 +933,11 @@ show_summary() {
 
   section "Review Before Applying"
   printf '%bTarget%b: %s (%s, %s)\n' "$BOLD" "$RESET" "$OS_PRETTY_NAME" "$OS_CODENAME" "$ARCHITECTURE"
+  if ((CHANGE_HOSTNAME)); then
+    printf '%bSystem hostname%b: %s -> %s\n' "$BOLD" "$RESET" "$CURRENT_HOSTNAME" "$NEW_HOSTNAME"
+  else
+    printf '%bSystem hostname%b: unchanged (%s)\n' "$BOLD" "$RESET" "$CURRENT_HOSTNAME"
+  fi
   printf '%bRelay%b: %s on ORPort %s\n' "$BOLD" "$RESET" "$RELAY_NICKNAME" "$OR_PORT"
   printf '%bContactInfo%b: %s\n' "$BOLD" "$RESET" "$CONTACT_INFO"
   if ((ENABLE_IPV6)); then
@@ -864,6 +965,9 @@ show_summary() {
   done < "$torrc_preview"
 
   printf '\n%s\n' "Planned privileged changes:"
+  if ((CHANGE_HOSTNAME)); then
+    printf '  - Set the system hostname to %s and update /etc/hosts.\n' "$NEW_HOSTNAME"
+  fi
   printf '  - Configure the official Tor Project apt repository for %s.\n' "$OS_CODENAME"
   printf '  - Install tor and deb.torproject.org-keyring.\n'
   printf '  - Back up and update %s.\n' "$TORRC_PATH"
@@ -944,6 +1048,18 @@ configure_torrc() {
   local torrc_file="$TMP_DIR/torrc"
   build_torrc "$torrc_file"
   install_file_if_changed "$torrc_file" "$TORRC_PATH" "0644"
+}
+
+configure_hostname() {
+  local hosts_file="$TMP_DIR/hosts"
+
+  ((CHANGE_HOSTNAME)) || return 0
+
+  build_hosts_file "$hosts_file"
+  backup_file /etc/hostname
+  run "Setting system hostname to ${NEW_HOSTNAME}" hostnamectl set-hostname "$NEW_HOSTNAME"
+  install_file_if_changed "$hosts_file" /etc/hosts "0644"
+  success "System hostname configured. New SSH sessions should show ${NEW_HOSTNAME}."
 }
 
 nft_rule_exists() {
@@ -1070,6 +1186,7 @@ apply_changes() {
   section "Applying Changes"
   TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
 
+  configure_hostname
   check_apt_capacity
   install_repository_prerequisites
   configure_tor_repository
@@ -1122,6 +1239,7 @@ main() {
 
   banner
   require_supported_system
+  collect_system_hostname
   collect_relay_identity
   collect_ipv6
   collect_bandwidth

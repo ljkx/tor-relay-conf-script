@@ -78,6 +78,7 @@ The script expects a systemd-based Debian-family VPS with `apt`, `dpkg`, and eit
 
 The script guides you through:
 
+- Optional Linux system hostname change for fresh VPSes
 - Relay nickname
 - Public `ContactInfo` email or contact string
 - ORPort, default `9001`
@@ -94,6 +95,7 @@ The script guides you through:
 When confirmed, the script:
 
 - Detects Debian/Ubuntu version and CPU architecture.
+- Optionally changes the Linux system hostname with `hostnamectl` and updates `/etc/hosts`.
 - Configures the official Tor Project apt repository in `/etc/apt/sources.list.d/tor.sources`.
 - Installs the Tor Project signing key at `/usr/share/keyrings/deb.torproject.org-keyring.gpg`.
 - Installs `tor` and `deb.torproject.org-keyring`.
@@ -109,6 +111,8 @@ Backups are timestamped, for example:
 ```text
 /etc/tor/torrc.bak.20260518T120000Z
 ```
+
+When the optional hostname change is selected, `/etc/hostname` and `/etc/hosts` are backed up before modification.
 
 ## Generated torrc Shape
 
@@ -141,6 +145,7 @@ Sandbox 1
 - Keep SSH access open. The script only adds an ORPort firewall allow rule; it does not enable an inactive firewall or change default policies.
 - Cloud firewalls are outside the VPS. Open the ORPort in your provider panel if required.
 - The IPv6 prompt's early connectivity check is outbound-only. Inbound ORPort reachability is checked only after the firewall rule is applied and Tor restarts.
+- The optional system hostname is local server identity only. It is separate from the public Tor relay `Nickname`.
 - Tor relay operators should keep Tor and the operating system updated.
 - Leave Tor logs at notice level and keep `SafeLogging` enabled unless debugging a specific issue.
 - Do not publish real-time relay/system metrics. Tor recommends aggregation windows of at least a day when publishing statistics.

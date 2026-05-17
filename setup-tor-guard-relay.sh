@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.5"
+VERSION="1.0.6"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -35,6 +35,7 @@ RELAY_BANDWIDTH_BURST_MBITS=""
 CONFIGURE_ACCOUNTING=0
 ACCOUNTING_MAX_GBYTES=""
 ENABLE_AUTO_UPDATES=1
+INSTALL_NYX=1
 ENABLE_FIREWALL=0
 FIREWALL_KIND="none"
 FIREWALL_STATE="unavailable"
@@ -804,6 +805,13 @@ collect_maintenance_options() {
     warn "You chose not to configure automatic updates. Keep Tor and the OS updated manually."
   fi
 
+  info "Nyx is the Tor terminal monitor. It is handy for relay operators, but not required."
+  if ask_yes_no "Install Nyx for terminal relay monitoring?" "yes"; then
+    INSTALL_NYX=1
+  else
+    INSTALL_NYX=0
+  fi
+
   detect_firewall
   printf '%s\n' "Detected firewall: ${FIREWALL_KIND} (${FIREWALL_STATE})"
   case "$FIREWALL_KIND:$FIREWALL_STATE" in
@@ -1016,6 +1024,7 @@ show_summary() {
     printf '%bAccountingMax%b: not configured\n' "$BOLD" "$RESET"
   fi
   printf '%bAutomatic updates%b: %s\n' "$BOLD" "$RESET" "$([[ $ENABLE_AUTO_UPDATES -eq 1 ]] && printf yes || printf no)"
+  printf '%bInstall Nyx%b: %s\n' "$BOLD" "$RESET" "$([[ $INSTALL_NYX -eq 1 ]] && printf yes || printf no)"
   printf '%bFirewall change%b: %s (%s)\n' "$BOLD" "$RESET" "$([[ $ENABLE_FIREWALL -eq 1 ]] && printf yes || printf no)" "$FIREWALL_KIND"
   printf '%bTor Sandbox%b: %s\n' "$BOLD" "$RESET" "$([[ $ENABLE_TOR_SANDBOX -eq 1 ]] && printf yes || printf no)"
 
@@ -1030,6 +1039,9 @@ show_summary() {
   fi
   printf '  - Configure the official Tor Project apt repository for %s.\n' "$OS_CODENAME"
   printf '  - Install tor and deb.torproject.org-keyring.\n'
+  if ((INSTALL_NYX)); then
+    printf '  - Install nyx for terminal relay monitoring.\n'
+  fi
   printf '  - Back up and update %s.\n' "$TORRC_PATH"
   if ((ENABLE_AUTO_UPDATES)); then
     printf '  - Configure unattended upgrades for security and Tor packages.\n'
@@ -1089,6 +1101,12 @@ install_tor_package() {
   run "Updating apt package lists" env DEBIAN_FRONTEND=noninteractive apt-get update
   run "Installing Tor from the Tor Project repository" \
     env DEBIAN_FRONTEND=noninteractive apt-get install -y tor deb.torproject.org-keyring
+}
+
+install_nyx_package() {
+  ((INSTALL_NYX)) || return 0
+
+  run "Installing Nyx relay monitor" env DEBIAN_FRONTEND=noninteractive apt-get install -y nyx
 }
 
 configure_unattended_upgrades() {
@@ -1252,6 +1270,7 @@ apply_changes() {
   install_repository_prerequisites
   configure_tor_repository
   install_tor_package
+  install_nyx_package
 
   if ((ENABLE_AUTO_UPDATES)); then
     configure_unattended_upgrades
@@ -1277,6 +1296,9 @@ print_next_steps() {
   printf '  journalctl -u %s -f\n' "$TOR_SERVICE"
   printf '  journalctl -u %s --since "1 hour ago" | grep -F "Self-testing indicates"\n' "$TOR_SERVICE"
   printf '  ss -ltn | grep ":%s"\n' "$OR_PORT"
+  if ((INSTALL_NYX)); then
+    printf '  sudo -u debian-tor nyx\n'
+  fi
   printf '\n%s\n' "Relay Search usually shows a new relay after about 3 hours:"
   printf '  https://metrics.torproject.org/rs.html#search/%s\n' "$RELAY_NICKNAME"
   printf '\n%s\n' "Remember:"

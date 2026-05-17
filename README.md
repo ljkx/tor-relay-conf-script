@@ -102,6 +102,7 @@ The installer walks through the choices that actually matter:
 - Optional `RelayBandwidthRate` / `RelayBandwidthBurst`
 - Optional monthly `AccountingMax`
 - Automatic package updates
+- Optional Nyx install for terminal relay monitoring
 - Firewall rule management when a supported firewall is detected
 - Basic hardening via Tor `SafeLogging 1` and optional `Sandbox 1`
 - Explicit confirmation that this is **not** an exit relay
@@ -117,6 +118,7 @@ When confirmed, the script:
 - Configures the official Tor Project apt repository in `/etc/apt/sources.list.d/tor.sources`.
 - Installs the Tor Project signing key at `/usr/share/keyrings/deb.torproject.org-keyring.gpg`.
 - Installs `tor` and `deb.torproject.org-keyring`.
+- Optionally installs `nyx` for terminal relay monitoring.
 - Backs up `/etc/tor/torrc` before replacing it with a non-exit relay configuration.
 - Optionally installs and configures `unattended-upgrades` for security and Tor updates.
 - Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
@@ -210,6 +212,12 @@ Check the listener:
 
 ```bash
 ss -ltn | grep ':9001'
+```
+
+Open Nyx if you installed it:
+
+```bash
+sudo -u debian-tor nyx
 ```
 
 Verify the Tor config manually:

@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.2"
+VERSION="1.0.3"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -546,12 +546,13 @@ collect_ipv6() {
     warn "Enter a plain global IPv6 address, without brackets or CIDR suffix."
   done
 
-  if ask_yes_no "Run the Tor-recommended IPv6 connectivity check now?" "yes"; then
-    info "Pinging Tor directory authority IPv6 addresses."
+  info "This early IPv6 check is outbound-only; inbound ORPort reachability is checked after the firewall rule and Tor restart."
+  if ask_yes_no "Run the Tor-recommended outbound IPv6 connectivity check now?" "yes"; then
+    info "Pinging Tor directory authority IPv6 addresses. This does not require TCP ${OR_PORT} to be open."
     if ipv6_connectivity_ok; then
-      success "IPv6 connectivity check passed."
+      success "Outbound IPv6 connectivity check passed."
     else
-      warn "IPv6 connectivity check failed or could not complete."
+      warn "Outbound IPv6 connectivity check failed or could not complete."
       warn "Tor warns that enabling a broken IPv6 ORPort can leave the relay unused."
       if ask_yes_no "Disable IPv6 ORPort for safety?" "yes"; then
         ENABLE_IPV6=0
@@ -559,7 +560,7 @@ collect_ipv6() {
       fi
     fi
   else
-    warn "Skipped IPv6 connectivity check. Only keep IPv6 enabled if you know it works."
+    warn "Skipped outbound IPv6 connectivity check. Only keep IPv6 enabled if you know it works."
   fi
 }
 
@@ -996,14 +997,53 @@ verify_tor_config() {
   fi
 }
 
+check_tor_orport_self_test() {
+  local deadline
+  local log_output
+  local since_time
+
+  since_time=${1:-"5 minutes ago"}
+
+  command_exists journalctl || {
+    warn "journalctl not found; skipped Tor ORPort self-test log check."
+    return 0
+  }
+
+  info "Checking Tor ORPort reachability self-test logs for up to 90 seconds."
+  deadline=$((SECONDS + 90))
+
+  while ((SECONDS < deadline)); do
+    log_output=$(journalctl -u "$TOR_SERVICE" --since "$since_time" --no-pager 2>/dev/null || true)
+
+    if grep -Fq "Self-testing indicates your ORPort is reachable from the outside. Excellent." <<< "$log_output"; then
+      success "Tor reports the ORPort is reachable from outside."
+      return 0
+    fi
+
+    if grep -Fq "Your server has not managed to confirm that its ORPort is reachable" <<< "$log_output"; then
+      warn "Tor has not confirmed external ORPort reachability yet."
+      warn "Check local/cloud firewall rules for TCP ${OR_PORT}, then watch: journalctl -u ${TOR_SERVICE} -f"
+      return 0
+    fi
+
+    sleep 5
+  done
+
+  warn "Tor did not report ORPort self-test success within 90 seconds."
+  warn "This can take longer. Watch logs with: journalctl -u ${TOR_SERVICE} -f"
+}
+
 restart_and_verify_tor() {
+  local restart_since
+
   verify_tor_config
 
+  restart_since=$(date '+%Y-%m-%d %H:%M:%S')
   run "Enabling ${TOR_SERVICE}" systemctl enable "$TOR_SERVICE"
   run "Restarting ${TOR_SERVICE}" systemctl restart "$TOR_SERVICE"
 
   if ((DRY_RUN)); then
-    info "Would verify ${TOR_SERVICE} status and ORPort listener."
+    info "Would verify ${TOR_SERVICE} status, ORPort listener, and Tor ORPort self-test logs."
     return 0
   fi
 
@@ -1022,6 +1062,8 @@ restart_and_verify_tor() {
   else
     warn "ss command not found; skipped listener verification."
   fi
+
+  check_tor_orport_self_test "$restart_since"
 }
 
 apply_changes() {

@@ -101,7 +101,7 @@ When confirmed, the script:
 - Optionally installs and configures `unattended-upgrades` for security and Tor updates.
 - Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
 - Enables and restarts `tor@default`.
-- Verifies Tor config syntax, service status, and the ORPort listener when possible.
+- Verifies Tor config syntax, service status, local ORPort listener, and Tor's post-start ORPort reachability self-test when possible.
 - Checks apt-related disk space and inode availability before package operations.
 
 Backups are timestamped, for example:
@@ -140,6 +140,7 @@ Sandbox 1
 - This is a non-exit relay installer. It does not configure DNS resolver changes, exit policies, `IPv6Exit`, or `ExitRelay 1`.
 - Keep SSH access open. The script only adds an ORPort firewall allow rule; it does not enable an inactive firewall or change default policies.
 - Cloud firewalls are outside the VPS. Open the ORPort in your provider panel if required.
+- The IPv6 prompt's early connectivity check is outbound-only. Inbound ORPort reachability is checked only after the firewall rule is applied and Tor restarts.
 - Tor relay operators should keep Tor and the operating system updated.
 - Leave Tor logs at notice level and keep `SafeLogging` enabled unless debugging a specific issue.
 - Do not publish real-time relay/system metrics. Tor recommends aggregation windows of at least a day when publishing statistics.

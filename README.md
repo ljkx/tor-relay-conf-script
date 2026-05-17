@@ -102,6 +102,7 @@ When confirmed, the script:
 - Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
 - Enables and restarts `tor@default`.
 - Verifies Tor config syntax, service status, and the ORPort listener when possible.
+- Checks apt-related disk space and inode availability before package operations.
 
 Backups are timestamped, for example:
 
@@ -194,11 +195,20 @@ tor --verify-config -f /etc/tor/torrc
 
 Common issues:
 
+- `apt` reports `No space left on device`: the VPS filesystem or inode table is full. Check `df -h` and `df -ih`, then free space before re-running.
 - Provider firewall or security group does not allow inbound TCP ORPort.
 - Local firewall did not have a supported manager or ruleset.
 - IPv6 was enabled without working IPv6 connectivity.
 - Port is already in use.
 - VPS does not have a public IPv4 address.
+
+If an earlier package operation was interrupted by a full disk, clear the apt cache and retry after freeing space:
+
+```bash
+sudo apt clean
+sudo rm -rf /var/lib/apt/lists/partial/*
+sudo apt update
+```
 
 ## Updating
 

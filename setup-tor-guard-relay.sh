@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.1"
+VERSION="1.0.2"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -189,6 +189,7 @@ print_command() {
 
 run() {
   local description=$1
+  local exit_code
   shift
 
   info "$description"
@@ -197,7 +198,17 @@ run() {
     return 0
   fi
 
+  set +e
   "$@"
+  exit_code=$?
+  set -e
+
+  if ((exit_code != 0)); then
+    printf '%b[ERROR]%b Command failed with exit %s:' "$RED" "$RESET" "$exit_code" >&2
+    printf ' %q' "$@" >&2
+    printf '\n' >&2
+    return "$exit_code"
+  fi
 }
 
 trim() {
@@ -499,20 +510,33 @@ collect_ipv6() {
   fi
 
   local candidates
+  local candidate
+  local default_ipv6=""
   candidates=$(list_ipv6_candidates)
   if [[ -n "$candidates" ]]; then
+    default_ipv6=$(printf '%s\n' "$candidates" | head -n 1)
     printf '%s\n' "Detected global IPv6 candidates:"
     while IFS= read -r candidate; do
       printf '  - %s\n' "$candidate"
     done <<< "$candidates"
+    info "Press Enter at the IPv6 prompt to use ${default_ipv6}; type '-' to skip IPv6."
   else
     warn "No global IPv6 address was auto-detected. You can still enter one manually."
   fi
 
   while true; do
-    IPV6_ADDRESS=$(prompt_line "IPv6 address to advertise (without brackets, blank to skip)")
+    if [[ -n "$default_ipv6" ]]; then
+      IPV6_ADDRESS=$(prompt_line "IPv6 address to advertise (without brackets, '-' to skip)" "$default_ipv6")
+    else
+      IPV6_ADDRESS=$(prompt_line "IPv6 address to advertise (without brackets, blank to skip)")
+    fi
     if [[ -z "$IPV6_ADDRESS" ]]; then
       ENABLE_IPV6=0
+      return 0
+    fi
+    if [[ "$IPV6_ADDRESS" == "-" || "${IPV6_ADDRESS,,}" == "skip" ]]; then
+      ENABLE_IPV6=0
+      IPV6_ADDRESS=""
       return 0
     fi
     if valid_ipv6_address "$IPV6_ADDRESS"; then
@@ -537,6 +561,54 @@ collect_ipv6() {
   else
     warn "Skipped IPv6 connectivity check. Only keep IPv6 enabled if you know it works."
   fi
+}
+
+available_kib_for_path() {
+  local path=$1
+  df -Pk "$path" 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+
+available_inodes_for_path() {
+  local path=$1
+  df -Pi "$path" 2>/dev/null | awk 'NR == 2 { print $4 }'
+}
+
+check_path_capacity() {
+  local path=$1
+  local min_kib=$2
+  local min_inodes=$3
+  local available_kib
+  local available_inodes
+
+  [[ -e "$path" ]] || return 0
+
+  available_kib=$(available_kib_for_path "$path")
+  available_inodes=$(available_inodes_for_path "$path")
+
+  if [[ -n "$available_kib" && "$available_kib" =~ ^[0-9]+$ && ((available_kib < min_kib)) ]]; then
+    die "Not enough free disk space for apt under ${path}. Need at least $((min_kib / 1024)) MiB free; found $((available_kib / 1024)) MiB. Run: df -h"
+  fi
+
+  if [[ -n "$available_inodes" && "$available_inodes" =~ ^[0-9]+$ && ((available_inodes < min_inodes)) ]]; then
+    die "Not enough free inodes for apt under ${path}. Need at least ${min_inodes}; found ${available_inodes}. Run: df -ih"
+  fi
+}
+
+check_apt_capacity() {
+  section "Preflight"
+
+  if ((DRY_RUN)); then
+    info "Dry run: skipping apt disk-space preflight."
+    return 0
+  fi
+
+  command_exists df || die "df is required for the apt disk-space preflight."
+
+  check_path_capacity /var/lib/apt/lists 512000 2048
+  check_path_capacity /var/cache/apt/archives 512000 2048
+  check_path_capacity /var 512000 2048
+  check_path_capacity /tmp 65536 512
+  success "apt has enough free disk space and inodes for package operations."
 }
 
 collect_bandwidth() {
@@ -956,6 +1028,7 @@ apply_changes() {
   section "Applying Changes"
   TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
 
+  check_apt_capacity
   install_repository_prerequisites
   configure_tor_repository
   install_tor_package

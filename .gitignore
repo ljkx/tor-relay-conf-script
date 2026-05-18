@@ -5,3 +5,6 @@ Thumbs.db
 *.tmp
 *.bak
 *.log
+release-assets/
+__pycache__/
+*.pyc

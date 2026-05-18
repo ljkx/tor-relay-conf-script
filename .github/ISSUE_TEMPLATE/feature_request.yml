@@ -1,0 +1,37 @@
+name: Feature request
+description: Suggest a relay-operator workflow or safety improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Operator problem
+      description: What real relay-operator task would this improve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the interaction, defaults, and safety guardrails you expect.
+    validations:
+      required: true
+  - type: textarea
+    id: docs
+    attributes:
+      label: Official Tor documentation
+      description: Link official Tor Project docs if the feature changes relay behavior.
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk area
+      options:
+        - torrc generation
+        - exit relay behavior
+        - firewall / SSH access
+        - package management
+        - MyFamily
+        - cleanup
+        - UI / docs only
+        - other

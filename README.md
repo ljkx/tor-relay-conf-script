@@ -12,6 +12,15 @@ An interactive Bash operator console for setting up and maintaining a public Tor
 
 It is designed for the normal relay-operator details: nickname, public contact string, bandwidth budget, ORPort, IPv6, firewall choice, and whether the machine is meant to be an exit relay. The script handles the boring sharp edges: Tor Project apt repository setup, key verification, torrc generation, backups, syntax checks, systemd, firewall rules, MyFamily fingerprints, and follow-up health checks.
 
+## Project Map
+
+- [Quick Start](#quick-start): verified release download and one-liner.
+- [Operator Guide](docs/OPERATOR_GUIDE.md): day-two relay operation, MyFamily, backups, and cleanup boundaries.
+- [Security Policy](SECURITY.md): reporting and safety boundaries.
+- [Contributing](CONTRIBUTING.md): review rules and local checks.
+- [Changelog](CHANGELOG.md): release history.
+- [Release Guide](docs/RELEASE.md): maintainer release checklist.
+
 ## Status
 
 `v1.0.0-beta.1` is a prerelease. It is experimental privileged server software, so review it before running it, prefer `--dry-run` first, and use disposable VPS testing when you are unsure.
@@ -312,11 +321,15 @@ If you actually want to retire a relay, plan that separately. Deleting `/var/lib
 ## Development Checks
 
 ```bash
-bash -n setup-tor-guard-relay.sh
-shellcheck -S warning -e SC2034,SC2178 setup-tor-guard-relay.sh tests/test-functions.bash
-bash tests/test-functions.bash
-./setup-tor-guard-relay.sh --help
-./setup-tor-guard-relay.sh --version
+make check
+```
+
+That expands to Bash syntax, ShellCheck, function tests, helper syntax, and help/version smoke checks.
+
+Regenerate README screenshots from a captured dry-run transcript:
+
+```bash
+make render-screenshots
 ```
 
 GitHub Actions runs these checks on push and pull request.

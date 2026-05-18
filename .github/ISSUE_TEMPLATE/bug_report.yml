@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a problem with setup, repair, cleanup, or relay operation checks.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. Please remove private server details before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Script version
+      placeholder: "setup-tor-guard-relay.sh 1.0.0-beta.1"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Distro and codename
+      placeholder: "Ubuntu 24.04 noble, amd64"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Relay mode
+      options:
+        - Guard / middle
+        - Exit
+        - Existing relay console
+        - Cleanup mode
+        - Dry run
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What did you expect the script to do?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Paste the relevant output. Remove private addresses, private emails, and credentials.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: Checks already run
+      description: Include any relevant `--dry-run`, `journalctl`, `systemctl`, `tor --verify-config`, or Relay Search checks.
+      render: text
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I removed secrets, private keys, credentials, and private server details from this report.
+          required: true

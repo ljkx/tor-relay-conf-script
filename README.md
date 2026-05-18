@@ -9,6 +9,8 @@
 
 This repo is a small, opinionated Bash installer for turning a fresh Debian or Ubuntu VPS into a public Tor relay. It can configure a Guard/middle relay or, when you intentionally choose it, an exit relay with the Tor Project's recommended exit basics. It is meant for the person who knows the practical details, like a relay nickname, contact address, bandwidth expectations, whether the server has IPv6, and whether this VPS is supposed to exit traffic, but does not want to hand-edit `torrc` at midnight.
 
+The terminal flow uses numbered timeline-style steps, so you always know where you are in the setup.
+
 ## Status
 
 This is experimental software, but it works pretty well in real VPS testing so far. Treat it like a sharp tool: read it, run `--dry-run`, and only then let it touch a server.
@@ -20,8 +22,8 @@ Implementation note: this repository was built solely by **Codex 5.5 xhigh** fro
 Clone it, review it, and run it:
 
 ```bash
-git clone https://github.com/ljkx/tor-relay-conf-script.git
-cd tor-relay-conf-script
+git clone https://github.com/ljkx/tor-relay-setup.git
+cd tor-relay-setup
 less setup-tor-guard-relay.sh
 ./setup-tor-guard-relay.sh --dry-run
 sudo ./setup-tor-guard-relay.sh
@@ -30,31 +32,31 @@ sudo ./setup-tor-guard-relay.sh
 Download and start it in one line:
 
 ```bash
-curl -fsSLo setup-tor-guard-relay.sh "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+curl -fsSLo setup-tor-guard-relay.sh "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
 ```
 
 With `wget` instead:
 
 ```bash
-wget -O setup-tor-guard-relay.sh "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+wget -O setup-tor-guard-relay.sh "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
 ```
 
 Direct pipe mode also works on fresh VPSes after you have reviewed the script:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" | sudo bash
+curl -fsSL "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" | sudo bash
 ```
 
 With `wget` instead:
 
 ```bash
-wget -qO- "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" | sudo bash
+wget -qO- "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" | sudo bash
 ```
 
 Dry-run from the remote script:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/ljkx/tor-relay-conf-script/main/setup-tor-guard-relay.sh?$(date +%s)" | bash -s -- --dry-run
+curl -fsSL "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" | bash -s -- --dry-run
 ```
 
 If GitHub's raw CDN ever serves an older copy, the `?$(date +%s)` part forces a fresh fetch. The startup banner also prints the script version.
@@ -94,8 +96,8 @@ The installer walks through the choices that actually matter:
 - ORPort, default `9001`
 - Optional IPv6 ORPort
 - Exit relay options when exit mode is selected: provider readiness, reduced or default exit policy, optional IPv6 exiting, and local Unbound DNS setup
-- Optional `RelayBandwidthRate` / `RelayBandwidthBurst`
-- Optional monthly `AccountingMax`
+- Bandwidth mode: steady monthly traffic budget, manual `RelayBandwidthRate` / `RelayBandwidthBurst`, hard monthly `AccountingMax`, or no relay-specific cap
+- Maximum monthly traffic such as `10TB`, provider quota style, and safety headroom when using the steady budget mode
 - Automatic package updates
 - Optional Nyx install for terminal relay monitoring
 - Firewall rule management when a supported firewall is detected
@@ -119,6 +121,7 @@ When confirmed, the script:
 - Writes `ExitRelay 1` for exit mode, with `ReducedExitPolicy 1` by default unless you choose Tor's broader default exit policy.
 - Optionally writes `IPv6Exit 1` when exit mode and IPv6 ORPort are both selected.
 - Optionally installs and starts `unbound` for exit relay DNS, backs up `/etc/resolv.conf`, and points the system resolver at `127.0.0.1`.
+- Optionally calculates steady bandwidth limits from a monthly traffic budget, including `RelayBandwidthRate`, `RelayBandwidthBurst`, `AccountingRule`, and `AccountingMax`.
 - Optionally installs and configures `unattended-upgrades` for security and Tor updates.
 - Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
 - Enables and restarts `tor@default`.
@@ -163,17 +166,22 @@ Optional settings are added only when selected, such as:
 ```torrc
 ORPort [2001:db8::1234]:9001
 IPv6Exit 1
-RelayBandwidthRate 16 MBits
-RelayBandwidthBurst 32 MBits
+RelayBandwidthRate 1864 KBytes
+RelayBandwidthBurst 9320 KBytes
 AccountingStart month 1 00:00
-AccountingMax 2000 GBytes
+AccountingRule sum
+AccountingMax 9216 GBytes
 Sandbox 1
 ```
+
+That example is the shape produced by steady budget mode for a `10TB` monthly provider quota counted as combined inbound + outbound traffic with 10% headroom. The exact numbers change with your provider quota style and chosen safety margin.
 
 ## Security Notes
 
 - Always review privileged scripts before running them on a server.
 - `ContactInfo` is public. Use an address or contact string you are comfortable publishing.
+- The steady bandwidth calculator is designed to keep the relay useful throughout the month instead of racing into `AccountingMax` hibernation. It uses a safety headroom because Tor's accounting uses powers of two and does not count every byte a VPS provider may bill.
+- Provider traffic accounting differs. If you are unsure whether your provider counts inbound + outbound or outbound only, choose the combined inbound + outbound option.
 - Guard/middle mode writes `ExitRelay 0`; exit mode writes `ExitRelay 1` and the exit policy you selected.
 - Exit relays need more operational care than Guard/middle relays. Use a provider that allows exit traffic, plan abuse handling, and consider reverse DNS / WHOIS notes that clearly identify the server as a Tor exit.
 - For exit mode, the script can install Unbound and switch `/etc/resolv.conf` to `nameserver 127.0.0.1`, matching Tor's Debian/Ubuntu exit relay DNS guidance. It backs up the old resolver config first.
@@ -260,6 +268,7 @@ Common issues:
 - VPS does not have a public IPv4 address.
 - Exit mode was selected on a provider that blocks exit traffic or outbound DNS.
 - `/etc/resolv.conf` was locked with `chattr +i` and needs to be unlocked before changing DNS again.
+- Relay hibernates before the end of the month: lower the steady budget rate, increase safety headroom, or check whether the provider counts combined inbound + outbound traffic while Tor was configured with a less conservative accounting rule.
 
 If an earlier package operation was interrupted by a full disk, clear the apt cache and retry after freeing space:
 

@@ -7,12 +7,14 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.1.0"
+VERSION="1.2.0"
 DRY_RUN=0
 
 TMP_DIR=""
 TIMESTAMP=""
 BACKUPS_CREATED=()
+STEP_NUMBER=0
+CURRENT_STEP_LABEL=""
 
 OS_ID=""
 OS_VERSION_ID=""
@@ -35,10 +37,20 @@ EXIT_ALLOW_IPV6=0
 CONFIGURE_UNBOUND=0
 LOCK_RESOLV_CONF=0
 CONFIGURE_RELAY_BANDWIDTH=0
-RELAY_BANDWIDTH_RATE_MBITS=""
-RELAY_BANDWIDTH_BURST_MBITS=""
+RELAY_BANDWIDTH_RATE_VALUE=""
+RELAY_BANDWIDTH_RATE_UNIT="MBits"
+RELAY_BANDWIDTH_BURST_VALUE=""
+RELAY_BANDWIDTH_BURST_UNIT="MBits"
 CONFIGURE_ACCOUNTING=0
 ACCOUNTING_MAX_GBYTES=""
+ACCOUNTING_RULE="max"
+BANDWIDTH_MODE="none"
+MONTHLY_TRAFFIC_INPUT=""
+MONTHLY_TRAFFIC_GBYTES=""
+MONTHLY_TRAFFIC_USABLE_GBYTES=""
+MONTHLY_TRAFFIC_HEADROOM_PERCENT=10
+MONTHLY_TRAFFIC_BILLING_RULE="sum"
+STEADY_PER_DIRECTION_GBYTES=""
 ENABLE_AUTO_UPDATES=1
 INSTALL_NYX=1
 ENABLE_FIREWALL=0
@@ -156,35 +168,52 @@ parse_args() {
 }
 
 banner() {
-  printf '%b\n' "$CYAN"
-  cat <<'EOF'
-  ============================================================
-       Tor Relay Setup
-  ============================================================
-EOF
-  printf '%b' "$RESET"
-  printf '  %s %s\n' "$SCRIPT_NAME" "$VERSION"
-  printf '%s\n' "  This installer configures a public Tor relay."
-  printf '%s\n\n' "  It will show a summary before making privileged changes."
+  printf '\n%bTor Relay Setup%b %s\n' "$BOLD$CYAN" "$RESET" "$VERSION"
+  printf '%s\n' "Guided installer for public Guard/middle and exit relays."
+  printf '%s\n\n' "It will show a summary before making privileged changes."
 }
 
 section() {
-  printf '\n%b== %s ==%b\n' "$BOLD$BLUE" "$1" "$RESET"
+  STEP_NUMBER=$((STEP_NUMBER + 1))
+  CURRENT_STEP_LABEL=$(printf '%02d' "$STEP_NUMBER")
+  printf '\n%b[%s]%b %b+--%b %b%s%b\n' "$CYAN" "$CURRENT_STEP_LABEL" "$RESET" "$DIM" "$RESET" "$BOLD$BLUE" "$1" "$RESET"
+}
+
+step_prefix() {
+  if [[ -n "${CURRENT_STEP_LABEL:-}" ]]; then
+    printf '%b[%s]%b %b|%b ' "$CYAN" "$CURRENT_STEP_LABEL" "$RESET" "$DIM" "$RESET"
+  fi
+}
+
+prompt_step_prefix() {
+  if [[ -z "${CURRENT_STEP_LABEL:-}" ]]; then
+    return 0
+  fi
+
+  if [[ -w /dev/tty ]]; then
+    step_prefix > /dev/tty
+  else
+    step_prefix >&2
+  fi
 }
 
 info() {
+  step_prefix
   printf '%b[INFO]%b %s\n' "$BLUE" "$RESET" "$*"
 }
 
 success() {
+  step_prefix
   printf '%b[OK]%b %s\n' "$GREEN" "$RESET" "$*"
 }
 
 warn() {
+  step_prefix >&2
   printf '%b[WARN]%b %s\n' "$YELLOW" "$RESET" "$*" >&2
 }
 
 die() {
+  step_prefix >&2
   printf '%b[ERROR]%b %s\n' "$RED" "$RESET" "$*" >&2
   exit 1
 }
@@ -309,6 +338,7 @@ prompt_line() {
   local default_value=${2:-}
   local reply
 
+  prompt_step_prefix
   if [[ -n "$default_value" ]]; then
     prompt_printf '%b%s%b [%s]: ' "$BOLD" "$prompt" "$RESET" "$default_value"
   else
@@ -364,6 +394,7 @@ ask_yes_no() {
   esac
 
   while true; do
+    prompt_step_prefix
     prompt_printf '%b%s%b %s: ' "$BOLD" "$prompt" "$RESET" "$suffix"
     read_reply reply
     reply=$(trim "$reply")
@@ -383,6 +414,46 @@ ask_yes_no() {
 
 valid_integer() {
   [[ $1 =~ ^[0-9]+$ ]]
+}
+
+valid_percent() {
+  local value=$1
+  valid_integer "$value" || return 1
+  ((10#$value >= 0 && 10#$value <= 50))
+}
+
+parse_traffic_to_gbytes() {
+  local raw=$1
+  local compact
+  local number
+  local unit
+
+  compact=$(trim "$raw")
+  compact=${compact//[[:space:]]/}
+  compact=${compact^^}
+
+  [[ "$compact" =~ ^([0-9]+([.][0-9]+)?)(K|KB|KIB|KBYTE|KBYTES|M|MB|MIB|MBYTE|MBYTES|G|GB|GIB|GBYTE|GBYTES|T|TB|TIB|TBYTE|TBYTES)$ ]] || return 1
+  number=${BASH_REMATCH[1]}
+  unit=${BASH_REMATCH[3]}
+
+  awk -v number="$number" -v unit="$unit" '
+    BEGIN {
+      multiplier = 0
+      if (unit ~ /^K/) multiplier = 1 / (1024 * 1024)
+      else if (unit ~ /^M/) multiplier = 1 / 1024
+      else if (unit ~ /^G/) multiplier = 1
+      else if (unit ~ /^T/) multiplier = 1024
+      value = number * multiplier
+      if (value < 1) exit 1
+      printf "%d", value
+    }'
+}
+
+format_mbits_from_kbytes() {
+  local kbytes=$1
+  local tenths
+  tenths=$((10#$kbytes * 8192 / 100000))
+  printf '%d.%d' "$((tenths / 10))" "$((tenths % 10))"
 }
 
 valid_port() {
@@ -821,62 +892,237 @@ check_apt_capacity() {
   success "apt has enough free disk space and inodes for package operations."
 }
 
+reset_bandwidth_config() {
+  CONFIGURE_RELAY_BANDWIDTH=0
+  RELAY_BANDWIDTH_RATE_VALUE=""
+  RELAY_BANDWIDTH_RATE_UNIT="MBits"
+  RELAY_BANDWIDTH_BURST_VALUE=""
+  RELAY_BANDWIDTH_BURST_UNIT="MBits"
+  CONFIGURE_ACCOUNTING=0
+  ACCOUNTING_MAX_GBYTES=""
+  ACCOUNTING_RULE="max"
+  BANDWIDTH_MODE="none"
+  MONTHLY_TRAFFIC_INPUT=""
+  MONTHLY_TRAFFIC_GBYTES=""
+  MONTHLY_TRAFFIC_USABLE_GBYTES=""
+  MONTHLY_TRAFFIC_HEADROOM_PERCENT=10
+  MONTHLY_TRAFFIC_BILLING_RULE="sum"
+  STEADY_PER_DIRECTION_GBYTES=""
+}
+
+collect_traffic_budget() {
+  local prompt=${1:-"Maximum monthly traffic budget"}
+  local parsed
+
+  while true; do
+    MONTHLY_TRAFFIC_INPUT=$(prompt_line "$prompt (examples: 10TB, 5000GB)")
+    if parsed=$(parse_traffic_to_gbytes "$MONTHLY_TRAFFIC_INPUT"); then
+      MONTHLY_TRAFFIC_GBYTES=$parsed
+      break
+    fi
+    warn "Enter a traffic amount with units, for example 10TB, 2.5TB, or 5000GB."
+  done
+}
+
+collect_traffic_headroom() {
+  while true; do
+    MONTHLY_TRAFFIC_HEADROOM_PERCENT=$(prompt_line "Safety headroom percentage for provider overhead" "10")
+    if valid_percent "$MONTHLY_TRAFFIC_HEADROOM_PERCENT"; then
+      break
+    fi
+    warn "Enter a whole percentage from 0 to 50."
+  done
+
+  MONTHLY_TRAFFIC_USABLE_GBYTES=$((10#$MONTHLY_TRAFFIC_GBYTES * (100 - 10#$MONTHLY_TRAFFIC_HEADROOM_PERCENT) / 100))
+  if ((MONTHLY_TRAFFIC_USABLE_GBYTES < 1)); then
+    die "The usable traffic budget is below 1 GByte after headroom."
+  fi
+}
+
+collect_traffic_billing_rule() {
+  info "Provider traffic quotas are counted differently. Choose the closest match."
+  step_prefix
+  printf '%s\n' "  1) Combined inbound + outbound traffic (conservative default)"
+  step_prefix
+  printf '%s\n' "  2) Outbound traffic only"
+  step_prefix
+  printf '%s\n' "  3) Per-direction / Tor default max(in,out)"
+
+  while true; do
+    local choice
+    choice=$(prompt_line "Traffic quota style" "1")
+    case "${choice,,}" in
+      1|sum|combined|total|in+out)
+        MONTHLY_TRAFFIC_BILLING_RULE="sum"
+        ACCOUNTING_RULE="sum"
+        return 0
+        ;;
+      2|out|outbound|egress)
+        MONTHLY_TRAFFIC_BILLING_RULE="out"
+        ACCOUNTING_RULE="out"
+        return 0
+        ;;
+      3|max|direction|per-direction|perdirection)
+        MONTHLY_TRAFFIC_BILLING_RULE="max"
+        ACCOUNTING_RULE="max"
+        return 0
+        ;;
+      *)
+        warn "Choose 1, 2, or 3."
+        ;;
+    esac
+  done
+}
+
+calculate_steady_monthly_limits() {
+  local per_direction_gbytes
+  local rate_kbytes
+  local burst_kbytes
+
+  case "$MONTHLY_TRAFFIC_BILLING_RULE" in
+    sum)
+      per_direction_gbytes=$((10#$MONTHLY_TRAFFIC_USABLE_GBYTES / 2))
+      ;;
+    out|max)
+      per_direction_gbytes=$((10#$MONTHLY_TRAFFIC_USABLE_GBYTES))
+      ;;
+    *)
+      die "Unknown traffic billing rule: ${MONTHLY_TRAFFIC_BILLING_RULE}"
+      ;;
+  esac
+
+  if ((per_direction_gbytes < 1)); then
+    die "The monthly budget is too small after headroom and accounting style."
+  fi
+
+  rate_kbytes=$((per_direction_gbytes * 1024 * 1024 / 2592000))
+  if ((rate_kbytes < 75)); then
+    warn "That budget calculates to ${rate_kbytes} KBytes/s, below Tor's relay minimum of 75 KBytes/s."
+    return 1
+  fi
+
+  burst_kbytes=$((rate_kbytes * 5))
+
+  CONFIGURE_RELAY_BANDWIDTH=1
+  RELAY_BANDWIDTH_RATE_VALUE=$rate_kbytes
+  RELAY_BANDWIDTH_RATE_UNIT="KBytes"
+  RELAY_BANDWIDTH_BURST_VALUE=$burst_kbytes
+  RELAY_BANDWIDTH_BURST_UNIT="KBytes"
+  CONFIGURE_ACCOUNTING=1
+  ACCOUNTING_MAX_GBYTES=$MONTHLY_TRAFFIC_USABLE_GBYTES
+  STEADY_PER_DIRECTION_GBYTES=$per_direction_gbytes
+}
+
+collect_steady_monthly_bandwidth() {
+  BANDWIDTH_MODE="steady"
+
+  while true; do
+    collect_traffic_budget "Maximum monthly traffic allowed by your provider"
+    collect_traffic_headroom
+    collect_traffic_billing_rule
+    if calculate_steady_monthly_limits; then
+      break
+    fi
+    if ! ask_yes_no "Enter a larger monthly budget?" "yes"; then
+      die "Monthly budget is too small for a steady public Tor relay."
+    fi
+  done
+
+  success "Calculated steady rate: ${RELAY_BANDWIDTH_RATE_VALUE} ${RELAY_BANDWIDTH_RATE_UNIT}/s (~$(format_mbits_from_kbytes "$RELAY_BANDWIDTH_RATE_VALUE") Mbit/s)."
+  success "Calculated burst: ${RELAY_BANDWIDTH_BURST_VALUE} ${RELAY_BANDWIDTH_BURST_UNIT}/s."
+  info "AccountingMax is kept as a safety fuse at ${ACCOUNTING_MAX_GBYTES} GBytes with AccountingRule ${ACCOUNTING_RULE}."
+}
+
+collect_manual_relay_bandwidth() {
+  local default_burst
+
+  BANDWIDTH_MODE="manual"
+  CONFIGURE_RELAY_BANDWIDTH=1
+  RELAY_BANDWIDTH_RATE_UNIT="MBits"
+  RELAY_BANDWIDTH_BURST_UNIT="MBits"
+
+  while true; do
+    RELAY_BANDWIDTH_RATE_VALUE=$(prompt_line "Average relay bandwidth in Mbit/s" "16")
+    if valid_integer "$RELAY_BANDWIDTH_RATE_VALUE" && ((10#$RELAY_BANDWIDTH_RATE_VALUE >= 1)); then
+      break
+    fi
+    warn "Enter a positive whole number."
+  done
+
+  if ((10#$RELAY_BANDWIDTH_RATE_VALUE < 10)); then
+    warn "Tor relay requirements say 10 Mbit/s is the practical minimum; 16 Mbit/s or more is recommended."
+    if ! ask_yes_no "Continue with ${RELAY_BANDWIDTH_RATE_VALUE} Mbit/s anyway?" "no"; then
+      reset_bandwidth_config
+      collect_bandwidth
+      return 0
+    fi
+  elif ((10#$RELAY_BANDWIDTH_RATE_VALUE < 16)); then
+    warn "16 Mbit/s or more is recommended when available."
+  fi
+
+  default_burst=$((10#$RELAY_BANDWIDTH_RATE_VALUE * 2))
+  while true; do
+    RELAY_BANDWIDTH_BURST_VALUE=$(prompt_line "Burst bandwidth in Mbit/s" "$default_burst")
+    if valid_integer "$RELAY_BANDWIDTH_BURST_VALUE" && ((10#$RELAY_BANDWIDTH_BURST_VALUE >= 10#$RELAY_BANDWIDTH_RATE_VALUE)); then
+      break
+    fi
+    warn "Enter a whole number greater than or equal to the average rate."
+  done
+}
+
+collect_hard_accounting_cap() {
+  BANDWIDTH_MODE="accounting"
+  CONFIGURE_ACCOUNTING=1
+
+  collect_traffic_budget "Monthly AccountingMax traffic cap"
+  collect_traffic_headroom
+  collect_traffic_billing_rule
+  ACCOUNTING_MAX_GBYTES=$MONTHLY_TRAFFIC_USABLE_GBYTES
+
+  warn "AccountingMax is a hard cap. Tor may hibernate after the cap is reached."
+}
+
 collect_bandwidth() {
   section "Bandwidth and Traffic"
-  info "Without limits, Tor will not set a relay-specific bandwidth cap."
+  reset_bandwidth_config
 
-  if ask_yes_no "Set RelayBandwidthRate and RelayBandwidthBurst?" "yes"; then
-    CONFIGURE_RELAY_BANDWIDTH=1
-    while true; do
-      RELAY_BANDWIDTH_RATE_MBITS=$(prompt_line "Average relay bandwidth in Mbit/s" "16")
-      if valid_integer "$RELAY_BANDWIDTH_RATE_MBITS" && ((10#$RELAY_BANDWIDTH_RATE_MBITS >= 1)); then
-        break
-      fi
-      warn "Enter a positive whole number."
-    done
+  info "Tor AccountingMax is a hard quota and can hibernate the relay when exhausted."
+  info "Steady monthly mode calculates RelayBandwidthRate and RelayBandwidthBurst from your VPS traffic budget."
+  step_prefix
+  printf '%s\n' "  1) Steady monthly budget (recommended if your VPS has a traffic cap)"
+  step_prefix
+  printf '%s\n' "  2) Manual RelayBandwidthRate / RelayBandwidthBurst"
+  step_prefix
+  printf '%s\n' "  3) Hard monthly AccountingMax only"
+  step_prefix
+  printf '%s\n' "  4) No relay-specific bandwidth cap"
 
-    if ((10#$RELAY_BANDWIDTH_RATE_MBITS < 10)); then
-      warn "Tor relay requirements say 10 Mbit/s is the practical minimum; 16 Mbit/s or more is recommended."
-      if ! ask_yes_no "Continue with ${RELAY_BANDWIDTH_RATE_MBITS} Mbit/s anyway?" "no"; then
-        collect_bandwidth
+  while true; do
+    local choice
+    choice=$(prompt_line "Bandwidth mode" "1")
+    case "${choice,,}" in
+      1|steady|budget|monthly)
+        collect_steady_monthly_bandwidth
         return 0
-      fi
-    elif ((10#$RELAY_BANDWIDTH_RATE_MBITS < 16)); then
-      warn "16 Mbit/s or more is recommended when available."
-    fi
-
-    local default_burst=$((10#$RELAY_BANDWIDTH_RATE_MBITS * 2))
-    while true; do
-      RELAY_BANDWIDTH_BURST_MBITS=$(prompt_line "Burst bandwidth in Mbit/s" "$default_burst")
-      if valid_integer "$RELAY_BANDWIDTH_BURST_MBITS" && ((10#$RELAY_BANDWIDTH_BURST_MBITS >= 10#$RELAY_BANDWIDTH_RATE_MBITS)); then
-        break
-      fi
-      warn "Enter a whole number greater than or equal to the average rate."
-    done
-  else
-    CONFIGURE_RELAY_BANDWIDTH=0
-  fi
-
-  if ask_yes_no "Set a monthly AccountingMax traffic cap?" "no"; then
-    CONFIGURE_ACCOUNTING=1
-    while true; do
-      ACCOUNTING_MAX_GBYTES=$(prompt_line "Monthly cap in GBytes, per direction" "2000")
-      if valid_integer "$ACCOUNTING_MAX_GBYTES" && ((10#$ACCOUNTING_MAX_GBYTES >= 1)); then
-        break
-      fi
-      warn "Enter a positive whole number of GBytes."
-    done
-
-    if ((10#$ACCOUNTING_MAX_GBYTES < 100)); then
-      warn "Tor relay requirements say relays need at least 100 GBytes outbound and 100 GBytes inbound per month."
-      if ! ask_yes_no "Continue with ${ACCOUNTING_MAX_GBYTES} GBytes anyway?" "no"; then
-        CONFIGURE_ACCOUNTING=0
-        ACCOUNTING_MAX_GBYTES=""
-      fi
-    fi
-  else
-    CONFIGURE_ACCOUNTING=0
-  fi
+        ;;
+      2|manual|rate)
+        collect_manual_relay_bandwidth
+        return 0
+        ;;
+      3|accounting|cap|hard)
+        collect_hard_accounting_cap
+        return 0
+        ;;
+      4|none|no)
+        BANDWIDTH_MODE="none"
+        info "No relay-specific bandwidth cap will be written."
+        return 0
+        ;;
+      *)
+        warn "Choose 1, 2, 3, or 4."
+        ;;
+    esac
+  done
 }
 
 collect_maintenance_options() {
@@ -970,14 +1216,17 @@ build_torrc() {
     fi
     if ((CONFIGURE_RELAY_BANDWIDTH)); then
       printf '\n'
-      printf '# Relay-specific bandwidth limits. Units are bits per second here.\n'
-      printf 'RelayBandwidthRate %s MBits\n' "$RELAY_BANDWIDTH_RATE_MBITS"
-      printf 'RelayBandwidthBurst %s MBits\n' "$RELAY_BANDWIDTH_BURST_MBITS"
+      printf '# Relay-specific bandwidth limits. Tor applies these per second.\n'
+      printf 'RelayBandwidthRate %s %s\n' "$RELAY_BANDWIDTH_RATE_VALUE" "$RELAY_BANDWIDTH_RATE_UNIT"
+      printf 'RelayBandwidthBurst %s %s\n' "$RELAY_BANDWIDTH_BURST_VALUE" "$RELAY_BANDWIDTH_BURST_UNIT"
     fi
     if ((CONFIGURE_ACCOUNTING)); then
       printf '\n'
-      printf '# Monthly accounting cap. AccountingMax applies per direction.\n'
+      printf '# Monthly accounting safety cap. Tor hibernates if this is exhausted.\n'
       printf 'AccountingStart month 1 00:00\n'
+      if [[ "$ACCOUNTING_RULE" != "max" ]]; then
+        printf 'AccountingRule %s\n' "$ACCOUNTING_RULE"
+      fi
       printf 'AccountingMax %s GBytes\n' "$ACCOUNTING_MAX_GBYTES"
     fi
   } > "$output"
@@ -1131,12 +1380,18 @@ show_summary() {
     printf '%bIPv6 ORPort%b: disabled\n' "$BOLD" "$RESET"
   fi
   if ((CONFIGURE_RELAY_BANDWIDTH)); then
-    printf '%bBandwidth%b: %s MBits average, %s MBits burst\n' "$BOLD" "$RESET" "$RELAY_BANDWIDTH_RATE_MBITS" "$RELAY_BANDWIDTH_BURST_MBITS"
+    printf '%bBandwidth%b: %s %s/s average, %s %s/s burst\n' "$BOLD" "$RESET" "$RELAY_BANDWIDTH_RATE_VALUE" "$RELAY_BANDWIDTH_RATE_UNIT" "$RELAY_BANDWIDTH_BURST_VALUE" "$RELAY_BANDWIDTH_BURST_UNIT"
+    if [[ "$BANDWIDTH_MODE" == "steady" ]]; then
+      printf '%bEstimated average%b: ~%s Mbit/s, based on %s usable GBytes/month per relay direction\n' "$BOLD" "$RESET" "$(format_mbits_from_kbytes "$RELAY_BANDWIDTH_RATE_VALUE")" "$STEADY_PER_DIRECTION_GBYTES"
+    fi
   else
     printf '%bBandwidth%b: no relay-specific cap\n' "$BOLD" "$RESET"
   fi
   if ((CONFIGURE_ACCOUNTING)); then
-    printf '%bAccountingMax%b: %s GBytes per direction, monthly reset\n' "$BOLD" "$RESET" "$ACCOUNTING_MAX_GBYTES"
+    printf '%bAccountingMax%b: %s GBytes, monthly reset, AccountingRule %s\n' "$BOLD" "$RESET" "$ACCOUNTING_MAX_GBYTES" "$ACCOUNTING_RULE"
+    if [[ "$BANDWIDTH_MODE" == "steady" || "$BANDWIDTH_MODE" == "accounting" ]]; then
+      printf '%bTraffic budget%b: %s raw, %s%% headroom\n' "$BOLD" "$RESET" "$MONTHLY_TRAFFIC_INPUT" "$MONTHLY_TRAFFIC_HEADROOM_PERCENT"
+    fi
   else
     printf '%bAccountingMax%b: not configured\n' "$BOLD" "$RESET"
   fi

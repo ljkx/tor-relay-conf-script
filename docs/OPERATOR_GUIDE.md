@@ -20,6 +20,8 @@ Run a dry run first:
 ./setup-tor-guard-relay.sh --dry-run
 ```
 
+When `fzf` is available, the dry run uses the same selector workflow as a real run. Package/service/firewall commands are shown in local command-output panels instead of being sent anywhere.
+
 ## After Setup
 
 Check the service:
@@ -33,6 +35,8 @@ Follow logs:
 ```bash
 journalctl -u tor@default -f
 ```
+
+From the operator console, `Logs and signals` opens recent logs and live-follow output inside the fzf command window when fzf is active.
 
 Look for the ORPort self-test:
 

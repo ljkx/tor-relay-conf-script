@@ -11,7 +11,7 @@ body:
     id: version
     attributes:
       label: Script version
-      placeholder: "setup-tor-guard-relay.sh 1.0.0-beta.3"
+      placeholder: "setup-tor-guard-relay.sh 1.0.0-beta.4"
     validations:
       required: true
   - type: input

@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.0-beta.3"
+VERSION="1.0.0-beta.4"
 DRY_RUN=0
 CLEANUP_MODE=0
 USE_FZF=0
@@ -19,6 +19,8 @@ TIMESTAMP=""
 BACKUPS_CREATED=()
 RUN_LOCK_PATH=""
 LAST_BACKUP_PATH=""
+COMMAND_LOG_DIR=""
+LAST_COMMAND_LOG=""
 STEP_NUMBER=0
 CURRENT_STEP_LABEL=""
 CURRENT_STEP_TITLE=""
@@ -273,7 +275,10 @@ acquire_run_lock() {
 }
 
 fzf_available() {
-  ((USE_FZF)) && command_exists fzf && [[ -e /dev/tty && -r /dev/tty ]]
+  ((USE_FZF)) \
+    && command_exists fzf \
+    && [[ -e /dev/tty && -r /dev/tty && -w /dev/tty ]] \
+    && [[ -n "${TERM:-}" && "${TERM:-}" != "dumb" ]]
 }
 
 tui_available() {
@@ -286,7 +291,7 @@ bootstrap_tui() {
     return 0
   }
 
-  if command_exists fzf; then
+  if command_exists fzf && [[ -e /dev/tty && -r /dev/tty && -w /dev/tty ]] && [[ -n "${TERM:-}" && "${TERM:-}" != "dumb" ]]; then
     USE_FZF=1
     success "Polished selector mode enabled with fzf."
     return 0
@@ -445,6 +450,156 @@ print_command() {
   printf '\n'
 }
 
+shell_quote() {
+  printf '%q' "$1"
+}
+
+ensure_command_log_dir() {
+  if [[ -z "${COMMAND_LOG_DIR:-}" ]]; then
+    COMMAND_LOG_DIR="${TMP_DIR:-/tmp}/command-logs"
+  fi
+  mkdir -p "$COMMAND_LOG_DIR"
+}
+
+command_log_path() {
+  local description=$1
+  local safe_description
+
+  ensure_command_log_dir
+  safe_description=$(printf '%s' "$description" | tr -cs '[:alnum:]' '-' | sed 's/^-//; s/-$//; s/--*/-/g')
+  safe_description=${safe_description:-command}
+  mktemp "${COMMAND_LOG_DIR%/}/$(date -u '+%H%M%S').${safe_description}.XXXXXX.log"
+}
+
+write_command_header() {
+  local log_file=$1
+  local description=$2
+  shift 2
+
+  {
+    printf 'Tor Relay Setup command window\n'
+    printf 'Started: %s UTC\n' "$(date -u '+%Y-%m-%d %H:%M:%S')"
+    printf 'Action: %s\n' "$description"
+    printf 'Command:'
+    printf ' %q' "$@"
+    printf '\n\n'
+  } > "$log_file"
+}
+
+show_file_panel() {
+  local title=$1
+  local file=$2
+  local display_file
+
+  if [[ ! -s "$file" ]]; then
+    printf '(no output)\n' > "$file"
+  fi
+
+  if tui_available; then
+    display_file=$(mktemp_in_workspace)
+    nl -ba -w4 -s '  ' "$file" > "$display_file"
+    env FZF_DEFAULT_OPTS= fzf \
+      --height=90% \
+      --reverse \
+      --border \
+      --margin=1,2 \
+      --disabled \
+      --no-sort \
+      --prompt="view> " \
+      --pointer=">" \
+      --header="${title} | Scroll with arrows/PageUp/PageDown. Enter, q, or Esc returns." \
+      --bind=enter:accept,q:abort \
+      --color="fg:252,bg:232,hl:81,fg+:255,bg+:24,hl+:51,prompt:43,pointer:43,marker:154,info:141,border:66,header:110" \
+      < "$display_file" >/dev/null || true
+    rm -f -- "$display_file"
+  else
+    printf '\n%s\n' "$title"
+    sed -n '1,240p' "$file"
+  fi
+}
+
+show_live_log_panel() {
+  local title=$1
+  local file=$2
+  local pid=$3
+  local input_file
+  local quoted_file
+  local preview_command
+
+  tui_available || return 0
+
+  input_file=$(mktemp_in_workspace)
+  printf 'output\t%s\t%s\n' "$title" "Command output streams in the preview pane." > "$input_file"
+  quoted_file=$(shell_quote "$file")
+  if tail --help 2>/dev/null | grep -Fq -- '--pid'; then
+    preview_command="tail --pid=${pid} -n +1 -f ${quoted_file}"
+  else
+    preview_command="tail -n +1 -f ${quoted_file}"
+  fi
+
+  env FZF_DEFAULT_OPTS= fzf \
+    --height=90% \
+    --reverse \
+    --border \
+    --margin=1,2 \
+    --disabled \
+    --no-sort \
+    --delimiter=$'\t' \
+    --with-nth=2,3 \
+    --prompt="command> " \
+    --pointer=">" \
+    --header="CLI window: watch output below. Press Enter after the command finishes; Esc returns and waits safely." \
+    --preview="$preview_command" \
+    --preview-window=down:82%:wrap:follow \
+    --bind=enter:accept,q:abort \
+    --color="fg:252,bg:232,hl:81,fg+:255,bg+:24,hl+:51,prompt:43,pointer:43,marker:154,info:141,border:66,header:110" \
+    < "$input_file" >/dev/null || true
+  rm -f -- "$input_file"
+}
+
+run_tui_command() {
+  local description=$1
+  local log_file
+  local exit_code
+  local pid
+  shift
+
+  log_file=$(command_log_path "$description")
+  LAST_COMMAND_LOG=$log_file
+  write_command_header "$log_file" "$description" "$@"
+
+  (
+    set +e
+    if command_exists stdbuf; then
+      stdbuf -oL -eL "$@"
+    else
+      "$@"
+    fi
+    exit_code=$?
+    printf '\n[exit %s]\n' "$exit_code"
+    exit "$exit_code"
+  ) >> "$log_file" 2>&1 &
+  pid=$!
+
+  show_live_log_panel "$description" "$log_file" "$pid"
+  if kill -0 "$pid" 2>/dev/null; then
+    info "Waiting for '${description}' to finish. Output is still being written to ${log_file}."
+  fi
+
+  set +e
+  wait "$pid"
+  exit_code=$?
+  set -e
+
+  if ((exit_code == 0)); then
+    success "${description} completed. Log: ${log_file}"
+  else
+    warn "${description} failed with exit ${exit_code}. Showing command log."
+    show_file_panel "Command failed: ${description}" "$log_file"
+  fi
+  return "$exit_code"
+}
+
 run() {
   local description=$1
   local exit_code
@@ -454,6 +609,11 @@ run() {
   if ((DRY_RUN)); then
     print_command "$@"
     return 0
+  fi
+
+  if tui_available; then
+    run_tui_command "$description" "$@"
+    return $?
   fi
 
   set +e
@@ -467,6 +627,51 @@ run() {
     printf '\n' >&2
     return "$exit_code"
   fi
+}
+
+capture_command_panel() {
+  local title=$1
+  local log_file
+  local exit_code
+  shift
+
+  log_file=$(command_log_path "$title")
+  LAST_COMMAND_LOG=$log_file
+  write_command_header "$log_file" "$title" "$@"
+
+  set +e
+  "$@" >> "$log_file" 2>&1
+  exit_code=$?
+  set -e
+  printf '\n[exit %s]\n' "$exit_code" >> "$log_file"
+
+  show_file_panel "$title" "$log_file"
+  return "$exit_code"
+}
+
+follow_command_panel() {
+  local title=$1
+  local log_file
+  local pid
+  shift
+
+  if ! tui_available; then
+    info "Press Ctrl+C to stop following logs."
+    "$@" || true
+    return 0
+  fi
+
+  log_file=$(command_log_path "$title")
+  LAST_COMMAND_LOG=$log_file
+  write_command_header "$log_file" "$title" "$@"
+
+  "$@" >> "$log_file" 2>&1 &
+  pid=$!
+  show_live_log_panel "$title" "$log_file" "$pid"
+  if kill -0 "$pid" 2>/dev/null; then
+    kill "$pid" 2>/dev/null || true
+  fi
+  wait "$pid" 2>/dev/null || true
 }
 
 install_fzf_for_current_run() {
@@ -517,7 +722,9 @@ prompt_line() {
   local reply
 
   if tui_available; then
-    prompt_line_fzf reply "$prompt" "$default_value"
+    if ! prompt_line_fzf reply "$prompt" "$default_value"; then
+      reply=$default_value
+    fi
     trim "$reply"
     return 0
   fi
@@ -548,7 +755,7 @@ prompt_printf() {
 read_reply() {
   local variable_name=$1
 
-  if [[ -t 1 && -e /dev/tty && -r /dev/tty ]]; then
+  if [[ -t 0 && -e /dev/tty && -r /dev/tty && -w /dev/tty ]]; then
     if IFS= read -r "${variable_name?}" < /dev/tty 2>/dev/null; then
       return 0
     fi
@@ -646,7 +853,7 @@ choose_with_fzf() {
       ;;
     delete)
       # shellcheck disable=SC2054
-      args+=(--multi --bind=space:toggle,d:accept --header="Space marks rows. Press d or Enter to continue to delete confirmation; Esc cancels.")
+      args+=(--multi --bind=space:toggle,d:accept --header="Space marks rows. Press d or Enter to review selected deletion(s); Esc goes back.")
       ;;
     single)
       args+=(--header="Type to filter. Enter selects; Esc cancels.")
@@ -660,6 +867,28 @@ choose_with_fzf() {
   esac
 
   env FZF_DEFAULT_OPTS= fzf "${args[@]}" < "$input_file" > "$output_file"
+}
+
+menu_cancel_choice() {
+  local default_choice=$1
+  shift
+  local -a options=("$@")
+  local key
+  local label
+  local i
+
+  for ((i = 0; i < ${#options[@]}; i += 3)); do
+    key=${options[i]}
+    label=${options[i + 1]}
+    case "$key" in
+      q|x) printf '%s' "$key"; return 0 ;;
+    esac
+    case "${label,,}" in
+      back|exit|cancel) printf '%s' "$key"; return 0 ;;
+    esac
+  done
+
+  printf '%s' "$default_choice"
 }
 
 prompt_line_fzf() {
@@ -701,7 +930,7 @@ prompt_line_fzf() {
 
   if ! env FZF_DEFAULT_OPTS= fzf "${args[@]}" < "$list_file" > "$output_file"; then
     rm -f -- "$list_file" "$output_file"
-    die "Cancelled by user."
+    return 1
   fi
 
   mapfile -t fzf_lines < "$output_file"
@@ -760,7 +989,9 @@ choose_menu() {
     done
 
     if ! choose_with_fzf "$output_file" "$title" single "$list_file" "$expect_keys"; then
-      die "Cancelled by user."
+      rm -f -- "$list_file" "$output_file"
+      result_ref=$(menu_cancel_choice "$default_choice" "${options[@]}")
+      return 0
     fi
     mapfile -t fzf_lines < "$output_file"
     menu_reply=${fzf_lines[0]:-}
@@ -825,6 +1056,8 @@ choose_checklist() {
   local description
   local status
   local line
+  local token
+  local valid_token
   local i
 
   result_ref=()
@@ -874,8 +1107,34 @@ choose_checklist() {
   line=$(prompt_line "Choose one or more entries separated by spaces or commas (blank to cancel)")
   [[ -n "$line" ]] || return 1
   line=${line//,/ }
-  # shellcheck disable=SC2206
-  result_ref=($line)
+  read -r -a result_ref <<< "$line"
+
+  for token in "${result_ref[@]}"; do
+    valid_token=0
+    for ((i = 0; i < ${#options[@]}; i += 4)); do
+      if [[ "$token" == "${options[i]}" ]]; then
+        valid_token=1
+        break
+      fi
+    done
+    if ((valid_token == 0)); then
+      warn "Invalid selection ignored: ${token}"
+    fi
+  done
+
+  local -a validated=()
+  for token in "${result_ref[@]}"; do
+    valid_token=0
+    for ((i = 0; i < ${#options[@]}; i += 4)); do
+      if [[ "$token" == "${options[i]}" ]] && ! selection_contains "$token" "${validated[@]}"; then
+        validated+=("$token")
+        valid_token=1
+        break
+      fi
+    done
+  done
+  result_ref=("${validated[@]}")
+  ((${#result_ref[@]} > 0))
 }
 
 valid_integer() {
@@ -2230,6 +2489,7 @@ lookup_family_status() {
   local -a fingerprints=("$@")
   local lookup
   local json_file="$TMP_DIR/onionoo-family-status.json"
+  local report_file="$TMP_DIR/onionoo-family-status.txt"
   local count
   local python_bin
 
@@ -2266,12 +2526,21 @@ PY
     return 0
   fi
 
-  step_prefix
-  printf '%s\n' "Published relay status for configured MyFamily fingerprints:"
-  while IFS=$'\t' read -r nickname fingerprint running addresses; do
-    step_prefix
-    printf '  %s  %s  %s  %s\n' "$nickname" "$fingerprint" "$running" "${addresses:-no addresses shown}"
-  done <<< "$count"
+  {
+    printf '%s\n' "Published relay status for configured MyFamily fingerprints:"
+    while IFS=$'\t' read -r nickname fingerprint running addresses; do
+      printf '  %s  %s  %s  %s\n' "$nickname" "$fingerprint" "$running" "${addresses:-no addresses shown}"
+    done <<< "$count"
+  } > "$report_file"
+
+  if tui_available; then
+    show_file_panel "MyFamily Published Status" "$report_file"
+  else
+    while IFS= read -r line; do
+      step_prefix
+      printf '%s\n' "$line"
+    done < "$report_file"
+  fi
 }
 
 print_myfamily_editor_list() {
@@ -2299,6 +2568,32 @@ print_myfamily_editor_list() {
   done
 }
 
+show_myfamily_editor_panel() {
+  local array_name=$1
+  local -n family_array=$array_name
+  local local_fp=$2
+  local report_file="$TMP_DIR/myfamily-editor.txt"
+  local index=1
+  local fingerprint
+
+  {
+    printf 'Current MyFamily editor\n\n'
+    if ((${#family_array[@]} == 0)); then
+      printf '(empty)\n'
+    fi
+    for fingerprint in "${family_array[@]}"; do
+      if [[ -n "$local_fp" && "$fingerprint" == "$local_fp" ]]; then
+        printf '%2d. %s  (this relay, pinned)\n' "$index" "$fingerprint"
+      else
+        printf '%2d. %s\n' "$index" "$fingerprint"
+      fi
+      index=$((index + 1))
+    done
+  } > "$report_file"
+
+  show_file_panel "Current MyFamily Editor" "$report_file"
+}
+
 add_myfamily_member() {
   local array_name=$1
   local -n family_array=$array_name
@@ -2306,7 +2601,7 @@ add_myfamily_member() {
   local resolved_fp
   local added_count=0
 
-  entry=$(prompt_line "Relay nickname or 40-char fingerprint to add")
+  entry=$(prompt_line "Relay nickname or fingerprint to add (leading '$' is accepted)")
   [[ -n "$entry" ]] || return 0
 
   if select_relay_fingerprint "$entry"; then
@@ -2356,7 +2651,7 @@ remove_myfamily_member() {
   done
 
   if tui_available; then
-    delete_title="MyFamily fingerprints: Space selects, d deletes"
+    delete_title="MyFamily fingerprints: Space marks, d reviews deletion(s)"
   fi
 
   if ! choose_checklist selections "$delete_title" --delete "${remove_options[@]}"; then
@@ -2476,7 +2771,12 @@ manage_myfamily() {
 
   if local_fp=$(local_relay_fingerprint); then
     local_fp=$(normalize_fingerprint "$local_fp")
-    success "Local relay fingerprint: ${local_fp}"
+    if valid_fingerprint "$local_fp"; then
+      success "Local relay fingerprint: ${local_fp}"
+    else
+      warn "Local relay fingerprint file did not contain a valid 40-character fingerprint; it will not be pinned."
+      local_fp=""
+    fi
   else
     warn "Could not read the local relay fingerprint. Start Tor first or check $(tor_datadirectory)/fingerprint."
   fi
@@ -2500,7 +2800,8 @@ manage_myfamily() {
     fi
     choose_menu choice "MyFamily editor: ${#family_fingerprints[@]} fingerprint(s)" "a" \
       "a" "Add relay(s)" "Nickname lookup or 40-char fingerprint" \
-      "d" "Delete selected" "Search list, Space marks rows, d accepts deletion" \
+      "v" "View current list" "Show pending fingerprints and pinned local relay" \
+      "d" "Review deletions" "Search list, Space marks rows, d reviews selected deletion(s)" \
       "c" "Check published status" "Query Tor Metrics Onionoo" \
       "s" "Save and apply" "Write torrc and optionally restart Tor" \
       "q" "Discard and go back" "Leave torrc unchanged"
@@ -2508,6 +2809,9 @@ manage_myfamily() {
     case "$choice" in
       a)
         add_myfamily_member family_fingerprints
+        ;;
+      v)
+        show_myfamily_editor_panel family_fingerprints "$local_fp"
         ;;
       d)
         remove_myfamily_member family_fingerprints "$local_fp"
@@ -2530,6 +2834,7 @@ manage_myfamily() {
 show_myfamily_status() {
   local -a fingerprints=()
   local fingerprint
+  local report_file="$TMP_DIR/configured-myfamily.txt"
 
   section "MyFamily Status"
   while IFS= read -r fingerprint; do
@@ -2541,12 +2846,21 @@ show_myfamily_status() {
     return 0
   fi
 
-  step_prefix
-  printf '%s\n' "Configured MyFamily fingerprints:"
-  for fingerprint in "${fingerprints[@]}"; do
-    step_prefix
-    printf '  %s\n' "$fingerprint"
-  done
+  {
+    printf '%s\n' "Configured MyFamily fingerprints:"
+    for fingerprint in "${fingerprints[@]}"; do
+      printf '  %s\n' "$fingerprint"
+    done
+  } > "$report_file"
+
+  if tui_available; then
+    show_file_panel "Configured MyFamily" "$report_file"
+  else
+    while IFS= read -r fingerprint; do
+      step_prefix
+      printf '%s\n' "$fingerprint"
+    done < "$report_file"
+  fi
   lookup_family_status "${fingerprints[@]}"
   info "Published family changes can take hours to show up in consensus and Relay Search."
 }
@@ -2672,7 +2986,7 @@ reload_or_restart_tor() {
     return 0
   fi
 
-  if systemctl reload "$TOR_SERVICE" 2>/dev/null; then
+  if run "Reloading ${TOR_SERVICE}" systemctl reload "$TOR_SERVICE"; then
     success "Reloaded ${TOR_SERVICE}."
   else
     warn "Reload failed or is unsupported; restarting ${TOR_SERVICE} instead."
@@ -2767,6 +3081,7 @@ configure_common_torrc_menu() {
 show_relay_directory_status() {
   local local_fp
   local json_file="$TMP_DIR/onionoo-details.json"
+  local report_file="$TMP_DIR/relay-directory-status.txt"
   local python_bin
 
   section "Relay Directory Status"
@@ -2777,19 +3092,21 @@ show_relay_directory_status() {
   fi
   local_fp=$(normalize_fingerprint "$local_fp")
   success "Local relay fingerprint: ${local_fp}"
-  printf 'Relay Search: https://metrics.torproject.org/rs.html#details/%s\n' "$local_fp"
+  printf 'Relay Search: https://metrics.torproject.org/rs.html#details/%s\n' "$local_fp" > "$report_file"
 
   python_bin=$(python_command) || {
     warn "python3/python is unavailable; cannot parse Onionoo details."
+    show_file_panel "Relay Directory Status" "$report_file"
     return 0
   }
 
   fetch_url_to_file "${ONIONOO_BASE_URL}/details?lookup=${local_fp}" "$json_file" || {
     warn "Could not fetch Tor Metrics Onionoo details."
+    show_file_panel "Relay Directory Status" "$report_file"
     return 0
   }
 
-  "$python_bin" - "$json_file" <<'PY'
+  "$python_bin" - "$json_file" >> "$report_file" <<'PY'
 import json
 import sys
 
@@ -2824,6 +3141,7 @@ if addresses:
     for address in addresses:
         print(f"  {address}")
 PY
+  show_file_panel "Relay Directory Status" "$report_file"
 }
 
 service_control_menu() {
@@ -2843,7 +3161,7 @@ service_control_menu() {
     case "$choice" in
       1)
         if command_exists systemctl; then
-          systemctl status "$TOR_SERVICE" --no-pager || true
+          capture_command_panel "${TOR_SERVICE} status" systemctl status "$TOR_SERVICE" --no-pager || true
         else
           warn "systemctl is unavailable."
         fi
@@ -2890,15 +3208,14 @@ logs_menu() {
     case "$choice" in
       1)
         if command_exists journalctl; then
-          journalctl -u "$TOR_SERVICE" -n 120 --no-pager || true
+          capture_command_panel "Recent Tor logs" journalctl -u "$TOR_SERVICE" -n 120 --no-pager || true
         else
           warn "journalctl is unavailable."
         fi
         ;;
       2)
         if command_exists journalctl; then
-          info "Press Ctrl+C to stop following logs."
-          journalctl -u "$TOR_SERVICE" -f || true
+          follow_command_panel "Live Tor logs" journalctl -u "$TOR_SERVICE" -f
         else
           warn "journalctl is unavailable."
         fi
@@ -2952,6 +3269,8 @@ backup_identity_keys() {
   local data_dir
   local keys_dir
   local archive
+  local backup_timestamp
+  local suffix=0
 
   section "Identity Key Backup"
   data_dir=$(tor_datadirectory)
@@ -2963,8 +3282,12 @@ backup_identity_keys() {
     return 0
   fi
 
-  ensure_timestamp
-  archive="/root/tor-relay-identity-keys.${TIMESTAMP}.tar.gz"
+  backup_timestamp=$(date -u '+%Y%m%dT%H%M%SZ')
+  archive="/root/tor-relay-identity-keys.${backup_timestamp}.tar.gz"
+  while [[ -e "$archive" ]]; do
+    suffix=$((suffix + 1))
+    archive="/root/tor-relay-identity-keys.${backup_timestamp}.${suffix}.tar.gz"
+  done
   if ((DRY_RUN)); then
     info "Would create ${archive}"
     print_command tar -C "$data_dir" -czf "$archive" keys
@@ -2999,21 +3322,26 @@ backups_menu() {
         ;;
       3)
         section "Available Backups"
-        printf '%s\n' "torrc backups:"
-        for backup in "${TORRC_PATH}".bak.*; do
-          [[ -e "$backup" ]] || continue
-          printf '  %s\n' "$backup"
-        done
-        printf '%s\n' "identity key archives:"
-        for backup in /root/tor-relay-identity-keys.*.tar.gz; do
-          [[ -e "$backup" ]] || continue
-          printf '  %s\n' "$backup"
-        done
+        local backups_report="$TMP_DIR/backups-list.txt"
+        {
+          printf '%s\n' "torrc backups:"
+          for backup in "${TORRC_PATH}".bak.*; do
+            [[ -e "$backup" ]] || continue
+            printf '  %s\n' "$backup"
+          done
+          printf '\n%s\n' "identity key archives:"
+          for backup in /root/tor-relay-identity-keys.*.tar.gz; do
+            [[ -e "$backup" ]] || continue
+            printf '  %s\n' "$backup"
+          done
+        } > "$backups_report"
+        show_file_panel "Available Backups" "$backups_report"
         ;;
       4)
         if choose_torrc_backup backup; then
           if ask_yes_no "Restore ${backup} to ${TORRC_PATH}?" "no"; then
             ensure_timestamp
+            verify_tor_config_file "$backup"
             install_file_if_changed "$backup" "$TORRC_PATH" "0644"
             verify_tor_config
             if ask_yes_no "Reload Tor after restoring torrc?" "yes"; then
@@ -3085,6 +3413,54 @@ package_tools_menu() {
         ;;
     esac
   done
+}
+
+command_logs_menu() {
+  local choice
+  local list_file
+  local output_file
+  local -a fzf_lines=()
+  local log_file
+
+  section "Command Logs"
+  ensure_command_log_dir
+
+  if ! find "$COMMAND_LOG_DIR" -type f -name '*.log' -print -quit 2>/dev/null | grep -q .; then
+    warn "No command logs are available in this run yet."
+    return 0
+  fi
+
+  if tui_available; then
+    list_file=$(mktemp_in_workspace)
+    output_file=$(mktemp_in_workspace)
+    while IFS= read -r log_file; do
+      printf '%s\t%s\t%s\n' "$log_file" "$(basename "$log_file")" "Command output captured during this run" >> "$list_file"
+    done < <(find "$COMMAND_LOG_DIR" -type f -name '*.log' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk '{ $1=""; sub(/^ /, ""); print }')
+
+    if env FZF_DEFAULT_OPTS= fzf \
+      --height=90% \
+      --reverse \
+      --border \
+      --margin=1,2 \
+      --delimiter=$'\t' \
+      --with-nth=2,3 \
+      --prompt="logs> " \
+      --pointer=">" \
+      --header="Select a command log. Enter opens it; Esc returns." \
+      --preview='sed -n "1,240p" {1}' \
+      --preview-window=down:70%:wrap \
+      --color="fg:252,bg:232,hl:81,fg+:255,bg+:24,hl+:51,prompt:43,pointer:43,marker:154,info:141,border:66,header:110" \
+      < "$list_file" > "$output_file"; then
+      mapfile -t fzf_lines < "$output_file"
+      choice=${fzf_lines[0]%%$'\t'*}
+      [[ -n "$choice" ]] && show_file_panel "Command Log: $(basename "$choice")" "$choice"
+    fi
+    rm -f -- "$list_file" "$output_file"
+  else
+    while IFS= read -r log_file; do
+      printf '  %s\n' "$log_file"
+    done < <(find "$COMMAND_LOG_DIR" -type f -name '*.log' -print | sort)
+  fi
 }
 
 script_realpath() {
@@ -3374,7 +3750,7 @@ repair_menu() {
         ;;
       3)
         if command_exists journalctl; then
-          journalctl -u "$TOR_SERVICE" -n 80 --no-pager || true
+          capture_command_panel "Recent Tor logs" journalctl -u "$TOR_SERVICE" -n 80 --no-pager || true
         else
           warn "journalctl is not available."
         fi
@@ -3415,6 +3791,7 @@ existing_relay_menu() {
       "7" "Backups" "torrc and identity-key backup/restore tools" \
       "8" "Packages and tools" "Tor repo, updates, Nyx, fzf" \
       "9" "Repair tools" "Config, restart, logs, firewall" \
+      "l" "Command logs" "View command output captured in this run" \
       "o" "Operator report" "Write a local troubleshooting report under /tmp" \
       "c" "Clean script traces" "Remove this installer/repo traces, not Tor" \
       "r" "Run full guided setup again" "Reconfigure this relay" \
@@ -3448,6 +3825,9 @@ existing_relay_menu() {
       9)
         repair_menu
         ;;
+      l)
+        command_logs_menu
+        ;;
       o)
         operator_report
         ;;
@@ -3464,7 +3844,7 @@ existing_relay_menu() {
   done
 }
 
-show_summary() {
+show_summary_body() {
   local torrc_preview="$TMP_DIR/torrc.preview"
   build_torrc "$torrc_preview"
 
@@ -3574,6 +3954,18 @@ show_summary() {
   printf '  - Enable and restart %s.\n' "$TOR_SERVICE"
 }
 
+show_summary() {
+  local summary_file
+
+  if tui_available; then
+    summary_file=$(mktemp_in_workspace)
+    show_summary_body > "$summary_file" 2>&1
+    show_file_panel "Review Before Applying" "$summary_file"
+  else
+    show_summary_body
+  fi
+}
+
 confirm_apply() {
   printf '\n'
   if ! ask_yes_no "Apply these changes now?" "no"; then
@@ -3600,9 +3992,10 @@ configure_tor_repository() {
     print_command wget -qO- "${TOR_APT_BASE_URL}/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc"
     print_command gpg --dearmor --output "$TOR_KEYRING_PATH"
   else
-    wget -qO "$ascii_key" "${TOR_APT_BASE_URL}/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc"
+    run "Fetching Tor Project package signing key" \
+      wget -qO "$ascii_key" "${TOR_APT_BASE_URL}/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc"
     verify_tor_signing_key_file "$ascii_key"
-    gpg --dearmor --yes --output "$binary_key" "$ascii_key"
+    run "Building Tor Project apt keyring" gpg --dearmor --yes --output "$binary_key" "$ascii_key"
   fi
 
   install_file_if_changed "$binary_key" "$TOR_KEYRING_PATH" "0644"
@@ -4004,12 +4397,14 @@ print_next_steps() {
 main() {
   parse_args "$@"
   TMP_DIR=$(mktemp -d)
+  COMMAND_LOG_DIR="${TMP_DIR%/}/command-logs"
 
   banner
   if ((CLEANUP_MODE)); then
     if ! ((PLAIN_TUI)) && command_exists fzf; then
       USE_FZF=1
     fi
+    acquire_run_lock
     cleanup_script_traces
     exit 0
   fi

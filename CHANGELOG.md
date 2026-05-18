@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented here.
 
+## v1.0.0-beta.4 - 2026-05-18
+
+### Changed
+
+- Added fzf command-output windows for apt, systemctl, firewall, and service actions, with local command logs for the current run.
+- Ported service status, recent logs, live log follow, repair logs, directory status, MyFamily status, backup listing, and command-log review into fzf/detail panels when available.
+- Improved fzf cancel/back behavior and made deletion wording less surprising.
+- Hardened plain checklist validation so hidden cleanup actions cannot be selected by typing arbitrary keys.
+- Validates the local relay fingerprint before auto-pinning it in MyFamily.
+- Verifies a selected torrc backup before restoring it and avoids overwriting identity-key backup archives in the same run.
+
 ## v1.0.0-beta.3 - 2026-05-18
 
 ### Changed

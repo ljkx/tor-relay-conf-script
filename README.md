@@ -23,13 +23,13 @@ It is designed for the normal relay-operator details: nickname, public contact s
 
 ## Status
 
-`v1.0.0-beta.3` is a prerelease. It is experimental privileged server software, so review it before running it, prefer `--dry-run` first, and use disposable VPS testing when you are unsure.
+`v1.0.0-beta.4` is a prerelease. It is experimental privileged server software, so review it before running it, prefer `--dry-run` first, and use disposable VPS testing when you are unsure.
 
 This repository was built solely by **Codex 5.5 xhigh** from the project requirements, official Tor documentation, and live VPS test feedback. It works well in the tested paths, but the beta label is intentional: relay operators should still read the planned changes before approving them.
 
 ## First Look
 
-These screenshots are rendered from a real `--plain --dry-run` capture under WSL Ubuntu 24.04.
+These screenshots currently show the plain fallback dry-run under WSL Ubuntu 24.04. The normal path uses fzf when available, including selector prompts and command-output panels.
 
 ![Tor Relay Setup guided dry-run](docs/assets/tor-relay-setup-first-run.svg)
 
@@ -40,7 +40,7 @@ These screenshots are rendered from a real `--plain --dry-run` capture under WSL
 Recommended path: download the tagged release asset, verify the checksum, review the script, then run it.
 
 ```bash
-VERSION="v1.0.0-beta.3"
+VERSION="v1.0.0-beta.4"
 curl -fsSLO "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh"
 curl -fsSLO "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/SHA256SUMS"
 sha256sum -c SHA256SUMS
@@ -53,7 +53,7 @@ sudo ./setup-tor-guard-relay.sh
 One-liner download and start:
 
 ```bash
-VERSION="v1.0.0-beta.3"; curl -fsSLo setup-tor-guard-relay.sh "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+VERSION="v1.0.0-beta.4"; curl -fsSLo setup-tor-guard-relay.sh "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
 ```
 
 Clone from GitHub:
@@ -61,7 +61,7 @@ Clone from GitHub:
 ```bash
 git clone https://github.com/ljkx/tor-relay-setup.git
 cd tor-relay-setup
-git checkout v1.0.0-beta.3
+git checkout v1.0.0-beta.4
 ./setup-tor-guard-relay.sh --dry-run
 sudo ./setup-tor-guard-relay.sh
 ```
@@ -78,7 +78,7 @@ sudo ./setup-tor-guard-relay.sh --uninstall
 Direct pipe mode is possible after review, but it is not the recommended path for privileged software:
 
 ```bash
-VERSION="v1.0.0-beta.3"; curl -fsSL "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" | sudo bash
+VERSION="v1.0.0-beta.4"; curl -fsSL "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" | sudo bash
 ```
 
 ## Supported Systems
@@ -117,7 +117,7 @@ Requirements:
 - Ask for IPv6, default to the detected global IPv6 address on Enter, and warn when IPv6 is manually kept after a failed or skipped check.
 - Calculate steady bandwidth limits from a monthly traffic budget such as `10TB`.
 - Optionally install Nyx.
-- Ask directly at startup whether to install `fzf`, then use searchable selectors for menus, yes/no choices, and guided text entry when available.
+- Ask directly at startup whether to install `fzf`, then use searchable selectors for menus, yes/no choices, guided text entry, list reviews, and command-output panels when available.
 - Optionally install UFW, preserve detected SSH ports, open the ORPort, and enable UFW.
 - Manage MyFamily by nickname or fingerprint through Tor Metrics Onionoo.
 - Automatically add the relay's own fingerprint to MyFamily when available.
@@ -193,6 +193,7 @@ When `/etc/tor/torrc` already contains an `ORPort`, the script opens a relay con
 - torrc and identity-key backups
 - package tools
 - repair tools
+- command log viewer
 - local operator report
 - script-trace cleanup
 - full guided setup again
@@ -201,12 +202,13 @@ The MyFamily manager stores fingerprints, not nicknames. Nickname lookup uses On
 
 Tor's documented `MyFamily` syntax prefixes fingerprints with `$`, so the generated torrc line intentionally looks like `MyFamily $FINGERPRINT,$OTHERFINGERPRINT`.
 
-With `fzf`, setup choices stay in the selector flow: yes/no prompts become two-row selectors, text prompts use fzf's query field, Space marks rows, and the preview pane shows row context. In delete screens, `d` continues to deletion confirmation. In plain mode, type the listed answers.
+With `fzf`, setup choices stay in the selector flow: yes/no prompts become two-row selectors, text prompts use fzf's query field, Space marks rows, and the preview pane shows row context. Command output from apt, systemctl, firewall tools, and service actions is captured into local command logs and shown in a scrollable fzf command window. In delete screens, `d` reviews selected deletion(s) before confirmation. In plain mode, type the listed answers.
 
 ## Security Notes
 
 - Review any privileged script before running it.
 - If `fzf` is missing, the script asks whether to install it before the main guided flow. Declining keeps a plain line interface; `--plain` skips fzf entirely.
+- Command logs are local temporary files for the current run. They are there for review and troubleshooting; they are not telemetry.
 - `ContactInfo` is public in relay directories.
 - MyFamily should include every relay controlled by the same operator, and the same family should be applied on each relay.
 - Guard/middle mode writes `ExitRelay 0`; exit mode writes `ExitRelay 1`.

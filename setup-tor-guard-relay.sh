@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.3.1"
+VERSION="1.3.2"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -1548,6 +1548,22 @@ append_unique_fingerprint() {
   target_array+=("$fingerprint")
 }
 
+fingerprint_in_array() {
+  local needle
+  local fingerprint
+  local existing
+
+  needle=$(normalize_fingerprint "$1")
+  shift
+
+  for existing in "$@"; do
+    fingerprint=$(normalize_fingerprint "$existing")
+    [[ "$fingerprint" == "$needle" ]] && return 0
+  done
+
+  return 1
+}
+
 fetch_url_to_file() {
   local url=$1
   local output=$2
@@ -1749,60 +1765,108 @@ PY
   done <<< "$count"
 }
 
-manage_myfamily() {
-  local local_fp=""
+print_myfamily_editor_list() {
+  local -n family_array=$1
+  local local_fp=$2
+  local index=1
+  local fingerprint
+  local marker
+
+  if ((${#family_array[@]} == 0)); then
+    info "MyFamily editor is empty."
+    return 0
+  fi
+
+  step_prefix
+  printf '%s\n' "Current MyFamily editor:"
+  for fingerprint in "${family_array[@]}"; do
+    marker=""
+    if [[ -n "$local_fp" && "$fingerprint" == "$local_fp" ]]; then
+      marker="  (this relay, pinned)"
+    fi
+    step_prefix
+    printf '  %s) %s%s\n' "$index" "$fingerprint" "$marker"
+    index=$((index + 1))
+  done
+}
+
+add_myfamily_member() {
+  local array_name=$1
+  local -n family_array=$array_name
   local entry
   local resolved_fp
+
+  entry=$(prompt_line "Relay nickname or 40-char fingerprint to add")
+  [[ -n "$entry" ]] || return 0
+
+  if select_relay_fingerprint "$entry"; then
+    resolved_fp=$SELECTED_RELAY_FINGERPRINT
+    if fingerprint_in_array "$resolved_fp" "${family_array[@]}"; then
+      success "${resolved_fp} is already in MyFamily."
+    else
+      append_unique_fingerprint "$array_name" "$resolved_fp"
+      success "Added ${resolved_fp}."
+    fi
+  else
+    warn "No fingerprint was added for '${entry}'."
+  fi
+}
+
+remove_myfamily_member() {
+  local array_name=$1
+  local -n family_array=$array_name
+  local local_fp=$2
+  local selection
+  local index
+  local removed
+
+  if ((${#family_array[@]} == 0)); then
+    warn "There are no fingerprints to remove."
+    return 0
+  fi
+
+  print_myfamily_editor_list "$array_name" "$local_fp"
+  selection=$(prompt_line "Fingerprint number to remove (blank to cancel)")
+  [[ -n "$selection" ]] || return 0
+
+  if ! valid_integer "$selection" || ((10#$selection < 1 || 10#$selection > ${#family_array[@]})); then
+    warn "Choose a number from the list."
+    return 0
+  fi
+
+  index=$((10#$selection - 1))
+  removed=${family_array[$index]}
+  if [[ -n "$local_fp" && "$removed" == "$local_fp" ]]; then
+    warn "The local relay fingerprint is pinned and will stay in MyFamily."
+    return 0
+  fi
+
+  unset 'family_array[index]'
+  family_array=("${family_array[@]}")
+  success "Removed ${removed}."
+}
+
+save_myfamily_changes() {
+  local array_name=$1
+  local -n family_array=$array_name
+  local local_fp=$2
   local family_csv
   local current_orport
-  local -a family_fingerprints=()
-  local fingerprint
 
-  section "MyFamily Manager"
-  torrc_exists || die "${TORRC_PATH} does not exist yet. Run the guided setup first."
-
-  info "Tor clients use MyFamily fingerprints to avoid choosing multiple relays controlled by the same operator in one circuit."
-  info "Nicknames are not unique. This tool resolves nicknames through Tor Metrics and asks you to confirm the exact fingerprint."
-
-  if local_fp=$(local_relay_fingerprint); then
-    append_unique_fingerprint family_fingerprints "$local_fp"
-    success "Local relay fingerprint: ${local_fp}"
-  else
-    warn "Could not read the local relay fingerprint. Start Tor first or check $(tor_datadirectory)/fingerprint."
+  if [[ -n "$local_fp" ]]; then
+    append_unique_fingerprint "$array_name" "$local_fp"
   fi
 
-  while IFS= read -r fingerprint; do
-    append_unique_fingerprint family_fingerprints "$fingerprint"
-  done < <(torrc_myfamily_fingerprints)
+  ((${#family_array[@]})) || die "No MyFamily fingerprints selected."
 
-  if ((${#family_fingerprints[@]})); then
-    step_prefix
-    printf '%s\n' "Current MyFamily fingerprints:"
-    for fingerprint in "${family_fingerprints[@]}"; do
-      step_prefix
-      printf '  %s\n' "$fingerprint"
-    done
-    lookup_family_status "${family_fingerprints[@]}"
-  else
-    info "No existing MyFamily fingerprints found in ${TORRC_PATH}."
-  fi
-
-  while true; do
-    entry=$(prompt_line "Relay nickname or 40-char fingerprint to add (blank when done)")
-    [[ -n "$entry" ]] || break
-
-    if select_relay_fingerprint "$entry"; then
-      resolved_fp=$SELECTED_RELAY_FINGERPRINT
-      append_unique_fingerprint family_fingerprints "$resolved_fp"
-      success "Added ${resolved_fp}."
-    else
-      warn "No fingerprint was added for '${entry}'."
+  if [[ -n "$local_fp" && ${#family_array[@]} -eq 1 ]]; then
+    warn "Only this relay is selected. MyFamily is useful once you add at least one other relay you control."
+    if ! ask_yes_no "Write a one-relay MyFamily anyway?" "no"; then
+      return 0
     fi
-  done
+  fi
 
-  ((${#family_fingerprints[@]})) || die "No MyFamily fingerprints selected."
-
-  family_csv=$(IFS=,; printf '%s' "${family_fingerprints[*]}")
+  family_csv=$(IFS=,; printf '%s' "${family_array[*]}")
   printf '\n'
   step_prefix
   printf '%s\n' "Proposed MyFamily line:"
@@ -1811,7 +1875,8 @@ manage_myfamily() {
   warn "Apply this same MyFamily value on every relay controlled by you. One-sided family entries are incomplete until other relays publish matching configs."
 
   if ! ask_yes_no "Write this MyFamily line to ${TORRC_PATH}?" "no"; then
-    die "Aborted before changing MyFamily."
+    warn "MyFamily changes were not written."
+    return 0
   fi
 
   TIMESTAMP=${TIMESTAMP:-$(date -u '+%Y%m%dT%H%M%SZ')}
@@ -1825,6 +1890,77 @@ manage_myfamily() {
   else
     warn "MyFamily will not be active until Tor reloads or restarts."
   fi
+}
+
+manage_myfamily() {
+  local local_fp=""
+  local -a family_fingerprints=()
+  local fingerprint
+  local choice
+
+  section "MyFamily Manager"
+  torrc_exists || die "${TORRC_PATH} does not exist yet. Run the guided setup first."
+
+  info "Tor clients use MyFamily fingerprints to avoid choosing multiple relays controlled by the same operator in one circuit."
+  info "Nicknames are not unique. This tool resolves nicknames through Tor Metrics and asks you to confirm the exact fingerprint."
+
+  if local_fp=$(local_relay_fingerprint); then
+    local_fp=$(normalize_fingerprint "$local_fp")
+    success "Local relay fingerprint: ${local_fp}"
+  else
+    warn "Could not read the local relay fingerprint. Start Tor first or check $(tor_datadirectory)/fingerprint."
+  fi
+
+  while IFS= read -r fingerprint; do
+    append_unique_fingerprint family_fingerprints "$fingerprint"
+  done < <(torrc_myfamily_fingerprints)
+
+  if [[ -n "$local_fp" ]]; then
+    if fingerprint_in_array "$local_fp" "${family_fingerprints[@]}"; then
+      success "Local relay fingerprint is already included and pinned."
+    else
+      append_unique_fingerprint family_fingerprints "$local_fp"
+      success "Automatically added this relay's fingerprint to MyFamily."
+    fi
+  fi
+
+  while true; do
+    print_myfamily_editor_list family_fingerprints "$local_fp"
+    step_prefix
+    printf '%s\n' "  a) Add relay by nickname/fingerprint"
+    step_prefix
+    printf '%s\n' "  r) Remove relay"
+    step_prefix
+    printf '%s\n' "  c) Check published status"
+    step_prefix
+    printf '%s\n' "  s) Save and apply"
+    step_prefix
+    printf '%s\n' "  q) Discard and go back"
+
+    choice=$(prompt_line "Choose an action" "a")
+    case "${choice,,}" in
+      a|add|1)
+        add_myfamily_member family_fingerprints
+        ;;
+      r|remove|delete|2)
+        remove_myfamily_member family_fingerprints "$local_fp"
+        ;;
+      c|check|status|3)
+        lookup_family_status "${family_fingerprints[@]}"
+        ;;
+      s|save|apply|4)
+        save_myfamily_changes family_fingerprints "$local_fp"
+        return 0
+        ;;
+      q|quit|back|discard|5|"")
+        warn "Discarded unsaved MyFamily changes."
+        return 0
+        ;;
+      *)
+        warn "Choose a, r, c, s, or q."
+        ;;
+    esac
+  done
 }
 
 show_myfamily_status() {

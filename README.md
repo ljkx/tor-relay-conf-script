@@ -191,11 +191,13 @@ When an active Tor service or relay `ORPort` is detected, the script offers:
 - Run the full guided setup again
 - Exit
 
-The MyFamily manager accepts a relay nickname or a full 40-character fingerprint. Nicknames are not unique, so nickname lookup uses Tor Metrics Onionoo, shows candidates with fingerprints and running status, and asks you to choose the exact relay number before writing anything.
+The MyFamily manager behaves like a small editor. It automatically adds and pins this relay's own fingerprint when it can read it, then lets you add relays by nickname or full 40-character fingerprint, remove entries by number, check published status, save, or discard changes. The editor actions are `a` add, `r` remove, `c` check, `s` save, and `q` quit.
+
+Nicknames are not unique, so nickname lookup uses Tor Metrics Onionoo, shows candidates with fingerprints and running status, and asks you to choose the exact relay number before writing anything.
 
 The script stores `MyFamily` as fingerprints, not nicknames. It backs up `/etc/tor/torrc`, keeps a single managed `MyFamily` line, verifies the Tor config, and offers to restart `tor@default`.
 
-Best practice: apply the same `MyFamily` value on every relay you control. Onionoo and Relay Search may need time to show the new family relationship after the relays publish updated descriptors.
+Best practice: apply the same `MyFamily` value on every relay you control, including each relay's own fingerprint. Onionoo and Relay Search may need time to show the new family relationship after the relays publish updated descriptors.
 
 ## Security Notes
 
@@ -203,7 +205,7 @@ Best practice: apply the same `MyFamily` value on every relay you control. Onion
 - `ContactInfo` is public. Use an address or contact string you are comfortable publishing.
 - The steady bandwidth calculator is designed to keep the relay useful throughout the month instead of racing into `AccountingMax` hibernation. It uses a safety headroom because Tor's accounting uses powers of two and does not count every byte a VPS provider may bill.
 - Provider traffic accounting differs. If you are unsure whether your provider counts inbound + outbound or outbound only, choose the combined inbound + outbound option.
-- Use `MyFamily` for every relay controlled by the same operator. The installer resolves nicknames to fingerprints because nicknames can collide.
+- Use `MyFamily` for every relay controlled by the same operator. The installer keeps the local fingerprint pinned and resolves nicknames to fingerprints because nicknames can collide.
 - Guard/middle mode writes `ExitRelay 0`; exit mode writes `ExitRelay 1` and the exit policy you selected.
 - Exit relays need more operational care than Guard/middle relays. Use a provider that allows exit traffic, plan abuse handling, and consider reverse DNS / WHOIS notes that clearly identify the server as a Tor exit.
 - For exit mode, the script can install Unbound and switch `/etc/resolv.conf` to `nameserver 127.0.0.1`, matching Tor's Debian/Ubuntu exit relay DNS guidance. It backs up the old resolver config first.
@@ -217,7 +219,7 @@ Best practice: apply the same `MyFamily` value on every relay you control. Onion
 - Tor relay operators should keep Tor and the operating system updated.
 - Leave Tor logs at notice level and keep `SafeLogging` enabled unless debugging a specific issue.
 - Do not publish real-time relay/system metrics. Tor recommends aggregation windows of at least a day when publishing statistics.
-- If you operate multiple relays, configure `MyFamily` manually after you know each relay fingerprint.
+- If you operate multiple relays, use the existing relay tools to keep `MyFamily` in sync on every relay.
 - After the relay is running, consider securely backing up `/var/lib/tor/keys`. Those identity keys are sensitive.
 - The script collects no secrets and implements no telemetry.
 

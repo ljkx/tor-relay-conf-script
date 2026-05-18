@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## v1.0.0-beta.2 - 2026-05-18
+
+### Fixed
+
+- Lock acquisition now falls back to `/tmp/tor-relay-setup.lock` when `/run/lock/tor-relay-setup.lock` cannot be opened on a VPS.
+
 ## v1.0.0-beta.1 - 2026-05-18
 
 First public beta release.

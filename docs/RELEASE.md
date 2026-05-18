@@ -14,7 +14,7 @@ Run a guided dry-run capture for README screenshots when UI output changes.
 ## Create Assets
 
 ```bash
-VERSION="v1.0.0-beta.1"
+VERSION="v1.0.0-beta.2"
 mkdir -p release-assets
 cp setup-tor-guard-relay.sh release-assets/
 (cd release-assets && sha256sum setup-tor-guard-relay.sh > SHA256SUMS)

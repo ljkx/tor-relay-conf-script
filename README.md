@@ -23,7 +23,7 @@ It is designed for the normal relay-operator details: nickname, public contact s
 
 ## Status
 
-`v1.0.0-beta.1` is a prerelease. It is experimental privileged server software, so review it before running it, prefer `--dry-run` first, and use disposable VPS testing when you are unsure.
+`v1.0.0-beta.2` is a prerelease. It is experimental privileged server software, so review it before running it, prefer `--dry-run` first, and use disposable VPS testing when you are unsure.
 
 This repository was built solely by **Codex 5.5 xhigh** from the project requirements, official Tor documentation, and live VPS test feedback. It works well in the tested paths, but the beta label is intentional: relay operators should still read the planned changes before approving them.
 
@@ -40,7 +40,7 @@ These screenshots are rendered from a real `--plain --dry-run` capture under WSL
 Recommended path: download the tagged release asset, verify the checksum, review the script, then run it.
 
 ```bash
-VERSION="v1.0.0-beta.1"
+VERSION="v1.0.0-beta.2"
 curl -fsSLO "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh"
 curl -fsSLO "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/SHA256SUMS"
 sha256sum -c SHA256SUMS
@@ -53,7 +53,7 @@ sudo ./setup-tor-guard-relay.sh
 One-liner download and start:
 
 ```bash
-VERSION="v1.0.0-beta.1"; curl -fsSLo setup-tor-guard-relay.sh "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+VERSION="v1.0.0-beta.2"; curl -fsSLo setup-tor-guard-relay.sh "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
 ```
 
 Clone from GitHub:
@@ -61,7 +61,7 @@ Clone from GitHub:
 ```bash
 git clone https://github.com/ljkx/tor-relay-setup.git
 cd tor-relay-setup
-git checkout v1.0.0-beta.1
+git checkout v1.0.0-beta.2
 ./setup-tor-guard-relay.sh --dry-run
 sudo ./setup-tor-guard-relay.sh
 ```
@@ -78,7 +78,7 @@ sudo ./setup-tor-guard-relay.sh --uninstall
 Direct pipe mode is possible after review, but it is not the recommended path for privileged software:
 
 ```bash
-VERSION="v1.0.0-beta.1"; curl -fsSL "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" | sudo bash
+VERSION="v1.0.0-beta.2"; curl -fsSL "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" | sudo bash
 ```
 
 ## Supported Systems

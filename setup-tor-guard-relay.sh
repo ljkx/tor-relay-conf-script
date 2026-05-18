@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.0-beta.1"
+VERSION="1.0.0-beta.2"
 DRY_RUN=0
 CLEANUP_MODE=0
 USE_FZF=0
@@ -250,22 +250,26 @@ command_exists() {
 }
 
 acquire_run_lock() {
-  local lock_dir="/run/lock"
-
-  if [[ ! -d "$lock_dir" || ! -w "$lock_dir" ]]; then
-    lock_dir="/tmp"
-  fi
-  RUN_LOCK_PATH="${lock_dir%/}/tor-relay-setup.lock"
+  local lock_path
 
   if ! command_exists flock; then
     warn "flock is not available; continuing without a single-run lock."
     return 0
   fi
 
-  exec 9>"$RUN_LOCK_PATH"
-  if ! flock -n 9; then
-    die "Another ${SCRIPT_NAME} run appears to be active (${RUN_LOCK_PATH})."
-  fi
+  for lock_path in /run/lock/tor-relay-setup.lock /tmp/tor-relay-setup.lock; do
+    RUN_LOCK_PATH=$lock_path
+    if { exec 9>"$RUN_LOCK_PATH"; } 2>/dev/null; then
+      if ! flock -n 9; then
+        die "Another ${SCRIPT_NAME} run appears to be active (${RUN_LOCK_PATH})."
+      fi
+      return 0
+    fi
+
+    warn "Could not open lock file at ${RUN_LOCK_PATH}; trying a fallback path."
+  done
+
+  die "Could not create a lock file in /run/lock or /tmp."
 }
 
 fzf_available() {

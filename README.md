@@ -103,7 +103,7 @@ The installer walks through the choices that actually matter:
 - Existing relay tools: MyFamily management, health checks, and repair actions without redoing the full installer
 - Automatic package updates
 - Optional Nyx install for terminal relay monitoring
-- Firewall rule management when a supported firewall is detected
+- Firewall setup: use an existing firewall manager, or optionally install UFW, allow SSH first, allow the ORPort, and enable UFW
 - Basic hardening via Tor `SafeLogging 1` and optional `Sandbox 1`
 
 It shows a final summary before doing privileged work, then asks for confirmation again.
@@ -128,6 +128,7 @@ When confirmed, the script:
 - When run on an existing relay, can resolve MyFamily members through Tor Metrics Onionoo by nickname or full fingerprint, then back up and update the `MyFamily` line in `/etc/tor/torrc`.
 - Optionally installs and configures `unattended-upgrades` for security and Tor updates.
 - Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
+- If no supported local firewall manager is installed, can install UFW, add an SSH allow rule before anything else, add the ORPort allow rule, and then enable UFW.
 - Enables and restarts `tor@default`.
 - Verifies Tor config syntax, service status, local ORPort listener, and Tor's post-start ORPort reachability self-test when possible.
 - Checks apt-related disk space and inode availability before package operations.
@@ -207,7 +208,8 @@ Best practice: apply the same `MyFamily` value on every relay you control. Onion
 - Exit relays need more operational care than Guard/middle relays. Use a provider that allows exit traffic, plan abuse handling, and consider reverse DNS / WHOIS notes that clearly identify the server as a Tor exit.
 - For exit mode, the script can install Unbound and switch `/etc/resolv.conf` to `nameserver 127.0.0.1`, matching Tor's Debian/Ubuntu exit relay DNS guidance. It backs up the old resolver config first.
 - The optional `/etc/resolv.conf` lock uses `chattr +i`. That can be useful on VPSes where DHCP keeps rewriting DNS, but you must unlock it manually with `sudo chattr -i /etc/resolv.conf` before future resolver changes.
-- Keep SSH access open. The script only adds an ORPort firewall allow rule; it does not enable an inactive firewall or change default policies.
+- Keep SSH access open. The script does not change firewall defaults silently; it asks before installing or enabling UFW.
+- When installing/enabling UFW, the script allows the detected SSH server port before enabling the firewall. Still keep a provider console or recovery path handy when changing firewall state on a VPS.
 - Cloud firewalls are outside the VPS. Open the ORPort in your provider panel if required.
 - The IPv6 prompt's early connectivity check is outbound-only and follows Tor's documented ping test against directory authority IPv6 addresses. Some networks make ICMPv6/ping awkward, so the script shows per-address results and lets an operator keep IPv6 enabled after manual verification.
 - Inbound ORPort reachability is checked only after the firewall rule is applied and Tor restarts.

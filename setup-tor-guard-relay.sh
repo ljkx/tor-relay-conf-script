@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.3.0"
+VERSION="1.3.1"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -57,6 +57,9 @@ INSTALL_NYX=1
 ENABLE_FIREWALL=0
 FIREWALL_KIND="none"
 FIREWALL_STATE="unavailable"
+INSTALL_UFW=0
+ENABLE_UFW_AFTER_RULES=0
+SSH_PORT_FOR_UFW="22"
 ENABLE_TOR_SANDBOX=1
 
 TORRC_PATH="/etc/tor/torrc"
@@ -591,6 +594,8 @@ require_supported_system() {
 detect_firewall() {
   FIREWALL_KIND="none"
   FIREWALL_STATE="unavailable"
+  INSTALL_UFW=0
+  ENABLE_UFW_AFTER_RULES=0
 
   if command_exists ufw; then
     FIREWALL_KIND="ufw"
@@ -623,6 +628,96 @@ detect_firewall() {
       FIREWALL_STATE="no supported inet filter input chain"
     fi
   fi
+}
+
+detect_ssh_port() {
+  local port=""
+  local config
+
+  if [[ -n "${SSH_CONNECTION:-}" ]]; then
+    # SSH_CONNECTION: client-ip client-port server-ip server-port
+    port=$(awk '{ print $4 }' <<< "$SSH_CONNECTION")
+  fi
+
+  if [[ -z "$port" ]]; then
+    for config in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+      [[ -r "$config" ]] || continue
+      port=$(awk '
+        /^[[:space:]]*#/ { next }
+        tolower($1) == "port" && $2 ~ /^[0-9]+$/ {
+          print $2
+          exit
+        }
+      ' "$config")
+      [[ -n "$port" ]] && break
+    done
+  fi
+
+  if [[ -n "$port" && "$port" =~ ^[0-9]+$ ]]; then
+    SSH_PORT_FOR_UFW=$port
+  else
+    SSH_PORT_FOR_UFW="22"
+  fi
+}
+
+collect_firewall_options() {
+  detect_firewall
+  detect_ssh_port
+
+  step_prefix
+  printf '%s\n' "Detected firewall: ${FIREWALL_KIND} (${FIREWALL_STATE})"
+
+  case "$FIREWALL_KIND:$FIREWALL_STATE" in
+    none:*)
+      info "No supported local firewall manager was detected."
+      if ask_yes_no "Install UFW, allow SSH and TCP ${OR_PORT}, then enable it?" "yes"; then
+        FIREWALL_KIND="ufw"
+        FIREWALL_STATE="absent"
+        INSTALL_UFW=1
+        ENABLE_FIREWALL=1
+        ENABLE_UFW_AFTER_RULES=1
+      else
+        ENABLE_FIREWALL=0
+        warn "No local firewall rule will be applied. You may still need to open TCP ${OR_PORT} in the VPS provider firewall."
+      fi
+      ;;
+    nftables:"no supported inet filter input chain")
+      ENABLE_FIREWALL=0
+      warn "nftables is present, but no 'inet filter input' chain was found. The script will not guess a ruleset."
+      if ask_yes_no "Install UFW instead and let it manage SSH plus TCP ${OR_PORT}?" "no"; then
+        FIREWALL_KIND="ufw"
+        FIREWALL_STATE="absent"
+        INSTALL_UFW=1
+        ENABLE_FIREWALL=1
+        ENABLE_UFW_AFTER_RULES=1
+      fi
+      ;;
+    ufw:inactive|ufw:installed)
+      if ask_yes_no "Allow SSH and TCP ${OR_PORT}, then enable UFW?" "yes"; then
+        ENABLE_FIREWALL=1
+        ENABLE_UFW_AFTER_RULES=1
+      elif ask_yes_no "Add the UFW rules but leave UFW inactive?" "yes"; then
+        ENABLE_FIREWALL=1
+        ENABLE_UFW_AFTER_RULES=0
+      else
+        ENABLE_FIREWALL=0
+      fi
+      ;;
+    firewalld:inactive)
+      if ask_yes_no "Add an ORPort rule anyway? The script will not enable inactive firewalld." "no"; then
+        ENABLE_FIREWALL=1
+      else
+        ENABLE_FIREWALL=0
+      fi
+      ;;
+    *)
+      if ask_yes_no "Open TCP ${OR_PORT} in ${FIREWALL_KIND}?" "yes"; then
+        ENABLE_FIREWALL=1
+      else
+        ENABLE_FIREWALL=0
+      fi
+      ;;
+  esac
 }
 
 collect_system_hostname() {
@@ -1174,32 +1269,7 @@ collect_maintenance_options() {
     INSTALL_NYX=0
   fi
 
-  detect_firewall
-  printf '%s\n' "Detected firewall: ${FIREWALL_KIND} (${FIREWALL_STATE})"
-  case "$FIREWALL_KIND:$FIREWALL_STATE" in
-    none:*)
-      ENABLE_FIREWALL=0
-      warn "No supported firewall manager was detected. You may need to open TCP ${OR_PORT} in your VPS/cloud firewall."
-      ;;
-    nftables:"no supported inet filter input chain")
-      ENABLE_FIREWALL=0
-      warn "nftables is present, but no 'inet filter input' chain was found. The script will not guess a ruleset."
-      ;;
-    ufw:inactive|firewalld:inactive)
-      if ask_yes_no "Add an ORPort rule anyway? The script will not enable the inactive firewall." "no"; then
-        ENABLE_FIREWALL=1
-      else
-        ENABLE_FIREWALL=0
-      fi
-      ;;
-    *)
-      if ask_yes_no "Open TCP ${OR_PORT} in ${FIREWALL_KIND}?" "yes"; then
-        ENABLE_FIREWALL=1
-      else
-        ENABLE_FIREWALL=0
-      fi
-      ;;
-  esac
+  collect_firewall_options
 
   info "SafeLogging stays enabled. The optional Tor syscall sandbox adds Linux hardening."
   if ask_yes_no "Enable Tor's syscall Sandbox option?" "yes"; then
@@ -1845,9 +1915,11 @@ repair_menu() {
     step_prefix
     printf '%s\n' "  4) Check ORPort self-test logs"
     step_prefix
-    printf '%s\n' "  5) Back"
+    printf '%s\n' "  5) Configure/repair local firewall"
+    step_prefix
+    printf '%s\n' "  6) Back"
 
-    choice=$(prompt_line "Choose an action" "5")
+    choice=$(prompt_line "Choose an action" "6")
     case "$choice" in
       1)
         if ! verify_tor_config; then
@@ -1869,11 +1941,19 @@ repair_menu() {
       4)
         check_tor_orport_self_test "1 hour ago"
         ;;
-      5|"")
+      5)
+        current_orport=$(read_torrc_first_orport || true)
+        OR_PORT=${current_orport:-$OR_PORT}
+        collect_firewall_options
+        if ((ENABLE_FIREWALL)); then
+          configure_firewall
+        fi
+        ;;
+      6|"")
         return 0
         ;;
       *)
-        warn "Choose 1, 2, 3, 4, or 5."
+        warn "Choose 1, 2, 3, 4, 5, or 6."
         ;;
     esac
   done
@@ -1972,6 +2052,12 @@ show_summary() {
   printf '%bAutomatic updates%b: %s\n' "$BOLD" "$RESET" "$([[ $ENABLE_AUTO_UPDATES -eq 1 ]] && printf yes || printf no)"
   printf '%bInstall Nyx%b: %s\n' "$BOLD" "$RESET" "$([[ $INSTALL_NYX -eq 1 ]] && printf yes || printf no)"
   printf '%bFirewall change%b: %s (%s)\n' "$BOLD" "$RESET" "$([[ $ENABLE_FIREWALL -eq 1 ]] && printf yes || printf no)" "$FIREWALL_KIND"
+  if ((INSTALL_UFW)); then
+    printf '%bInstall UFW%b: yes\n' "$BOLD" "$RESET"
+  fi
+  if ((ENABLE_UFW_AFTER_RULES)); then
+    printf '%bEnable UFW%b: yes, after allowing SSH TCP %s and ORPort TCP %s\n' "$BOLD" "$RESET" "$SSH_PORT_FOR_UFW" "$OR_PORT"
+  fi
   printf '%bTor Sandbox%b: %s\n' "$BOLD" "$RESET" "$([[ $ENABLE_TOR_SANDBOX -eq 1 ]] && printf yes || printf no)"
 
   printf '\n%s\n' "torrc preview:"
@@ -2000,7 +2086,17 @@ show_summary() {
     printf '  - Configure unattended upgrades for security and Tor packages.\n'
   fi
   if ((ENABLE_FIREWALL)); then
-    printf '  - Add a TCP %s allow rule using %s.\n' "$OR_PORT" "$FIREWALL_KIND"
+    if ((INSTALL_UFW)); then
+      printf '  - Install ufw.\n'
+    fi
+    if [[ "$FIREWALL_KIND" == "ufw" ]]; then
+      printf '  - Allow SSH TCP %s and Tor ORPort TCP %s using ufw.\n' "$SSH_PORT_FOR_UFW" "$OR_PORT"
+      if ((ENABLE_UFW_AFTER_RULES)); then
+        printf '  - Enable ufw after SSH and ORPort rules are present.\n'
+      fi
+    else
+      printf '  - Add a TCP %s allow rule using %s.\n' "$OR_PORT" "$FIREWALL_KIND"
+    fi
   fi
   printf '  - Enable and restart %s.\n' "$TOR_SERVICE"
 }
@@ -2153,15 +2249,30 @@ nft_rule_exists() {
   nft list chain inet filter input 2>/dev/null | grep -Fq "Tor relay ORPort ${OR_PORT}"
 }
 
+configure_ufw_firewall() {
+  if ((INSTALL_UFW)); then
+    run "Updating apt package lists before installing UFW" env DEBIAN_FRONTEND=noninteractive apt-get update
+    run "Installing UFW" env DEBIAN_FRONTEND=noninteractive apt-get install -y ufw
+  fi
+
+  ((DRY_RUN)) || command_exists ufw || die "ufw is not installed."
+
+  run "Allowing SSH TCP ${SSH_PORT_FOR_UFW} through UFW" ufw allow "${SSH_PORT_FOR_UFW}/tcp" comment "SSH"
+  run "Allowing TCP ${OR_PORT} through UFW" ufw allow "${OR_PORT}/tcp" comment "Tor relay ORPort"
+
+  if ((ENABLE_UFW_AFTER_RULES)); then
+    run "Enabling UFW" ufw --force enable
+  elif [[ "$FIREWALL_STATE" != "active" ]]; then
+    warn "UFW rules were added, but UFW is inactive."
+  fi
+}
+
 configure_firewall() {
   ((ENABLE_FIREWALL)) || return 0
 
   case "$FIREWALL_KIND" in
     ufw)
-      run "Allowing TCP ${OR_PORT} through UFW" ufw allow "${OR_PORT}/tcp" comment "Tor relay ORPort"
-      if [[ "$FIREWALL_STATE" == "inactive" ]]; then
-        warn "UFW is inactive. The rule was added, but UFW was not enabled."
-      fi
+      configure_ufw_firewall
       ;;
     firewalld)
       if [[ "$FIREWALL_STATE" != "active" ]]; then

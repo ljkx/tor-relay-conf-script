@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## v1.0.0-beta.3 - 2026-05-18
+
+### Changed
+
+- `fzf` is now offered directly at startup, and accepting installs it before the guided setup flow so the current run can use the polished selector interface.
+- Yes/no choices and guided text entry now use the fzf interface when available, keeping the setup closer to an `archinstall`-style workflow.
+- The MyFamily manager now explains that leading `$` prefixes are Tor's documented fingerprint syntax in `torrc`.
+
 ## v1.0.0-beta.2 - 2026-05-18
 
 ### Fixed

@@ -53,6 +53,7 @@ Use MyFamily when the same operator controls more than one public relay.
 Rules of thumb:
 
 - use fingerprints, not nicknames
+- expect torrc entries to prefix each fingerprint with `$`; that is Tor's documented `MyFamily` syntax
 - include every relay controlled by the same operator
 - apply the same family value on every relay in the family
 - expect directory publication to lag behind local config changes

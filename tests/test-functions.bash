@@ -29,7 +29,7 @@ assert_contains() {
 }
 
 test_version() {
-  assert_eq "1.0.0-beta.2" "$VERSION" "script version"
+  assert_eq "1.0.0-beta.3" "$VERSION" "script version"
 }
 
 test_traffic_parser_and_steady_budget() {

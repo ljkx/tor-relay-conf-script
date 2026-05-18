@@ -15,7 +15,7 @@
 <text x="28" y="262" font-family="DejaVu Sans Mono, Consolas, monospace" font-size="15" fill="#d8edf3">AccountingMax: not configured</text>
 <text x="28" y="284" font-family="DejaVu Sans Mono, Consolas, monospace" font-size="15" fill="#d8edf3">Automatic updates: no</text>
 <text x="28" y="306" font-family="DejaVu Sans Mono, Consolas, monospace" font-size="15" fill="#d8edf3">Install Nyx: no</text>
-<text x="28" y="328" font-family="DejaVu Sans Mono, Consolas, monospace" font-size="15" fill="#d8edf3">Install fzf: no</text>
+<text x="28" y="328" font-family="DejaVu Sans Mono, Consolas, monospace" font-size="15" fill="#d8edf3">fzf interface: not installed; plain line mode</text>
 <text x="28" y="350" font-family="DejaVu Sans Mono, Consolas, monospace" font-size="15" fill="#d8edf3">Firewall change: no (none)</text>
 <text x="28" y="372" font-family="DejaVu Sans Mono, Consolas, monospace" font-size="15" fill="#d8edf3">Tor Sandbox: yes</text>
 <text x="28" y="394" font-family="DejaVu Sans Mono, Consolas, monospace" font-size="15" fill="#d8edf3"></text>

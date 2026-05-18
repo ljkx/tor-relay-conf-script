@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.0.0-beta.2"
+VERSION="1.0.0-beta.3"
 DRY_RUN=0
 CLEANUP_MODE=0
 USE_FZF=0
@@ -297,8 +297,14 @@ bootstrap_tui() {
     return 0
   fi
 
-  warn "fzf is not installed. This run will use the built-in line interface."
-  info "You can choose to install fzf in the reviewed maintenance step or from Packages and Tools later."
+  warn "fzf is not installed. It powers the searchable setup interface."
+  warn "Installing it now runs apt-get update and apt-get install -y fzf before the final relay review."
+  if ask_yes_no "Install fzf now and use the full selector interface for this run?" "no"; then
+    install_fzf_for_current_run
+    return 0
+  fi
+
+  warn "Plain line mode selected because fzf installation was declined."
 }
 
 python_command() {
@@ -463,6 +469,31 @@ run() {
   fi
 }
 
+install_fzf_for_current_run() {
+  local fzf_was_installed=0
+
+  apt_package_installed fzf && fzf_was_installed=1
+
+  if command_exists df; then
+    check_path_capacity /var/lib/apt/lists 128000 2048
+    check_path_capacity /var/cache/apt/archives 128000 2048
+    check_path_capacity /tmp 65536 512
+  fi
+
+  run "Updating apt package lists for fzf" env DEBIAN_FRONTEND=noninteractive apt-get update
+  run "Installing fzf selector interface" env DEBIAN_FRONTEND=noninteractive apt-get install -y fzf
+
+  if ! command_exists fzf; then
+    die "fzf installation completed, but fzf is still not available in PATH."
+  fi
+
+  USE_FZF=1
+  if ((fzf_was_installed == 0)); then
+    mark_script_installed_fzf
+  fi
+  success "fzf selector mode enabled for this run."
+}
+
 trim() {
   local value=$*
   value="${value#"${value%%[![:space:]]*}"}"
@@ -484,6 +515,12 @@ prompt_line() {
   local prompt=$1
   local default_value=${2:-}
   local reply
+
+  if tui_available; then
+    prompt_line_fzf reply "$prompt" "$default_value"
+    trim "$reply"
+    return 0
+  fi
 
   prompt_step_prefix
   if [[ -n "$default_value" ]]; then
@@ -529,12 +566,28 @@ ask_yes_no() {
   local default_answer=${2:-}
   local suffix
   local reply
+  local default_choice
 
   case "$default_answer" in
     yes) suffix="[Y/n]" ;;
     no) suffix="[y/N]" ;;
     *) suffix="[y/n]" ;;
   esac
+
+  if tui_available; then
+    case "$default_answer" in
+      yes) default_choice="y" ;;
+      no) default_choice="n" ;;
+      *) default_choice="y" ;;
+    esac
+    choose_menu reply "$prompt" "$default_choice" \
+      "y" "Yes" "Apply this choice" \
+      "n" "No" "Skip this choice"
+    case "$reply" in
+      y) return 0 ;;
+      n) return 1 ;;
+    esac
+  fi
 
   while true; do
     prompt_step_prefix
@@ -607,6 +660,58 @@ choose_with_fzf() {
   esac
 
   env FZF_DEFAULT_OPTS= fzf "${args[@]}" < "$input_file" > "$output_file"
+}
+
+prompt_line_fzf() {
+  local result_name=$1
+  local prompt=$2
+  local default_value=${3:-}
+  local -n result_ref=$result_name
+  local list_file
+  local output_file
+  local query
+  local -a fzf_lines=()
+  # shellcheck disable=SC2054
+  local -a args=(
+    --height=40%
+    --reverse
+    --border
+    --margin=1,2
+    --delimiter=$'\t'
+    --with-nth=2,3
+    --prompt="${prompt}> "
+    --pointer=">"
+    --color="fg:252,bg:232,hl:81,fg+:255,bg+:24,hl+:51,prompt:43,pointer:43,marker:154,info:141,border:66,header:110"
+    --print-query
+    --query="$default_value"
+    --phony
+    --no-sort
+    --header="Type the value, then press Enter. Leave blank only when the field says blank is allowed. Esc cancels."
+    --preview='printf "%s\n\n%s\n" {2} {3}'
+    --preview-window=down:5:wrap
+  )
+
+  list_file=$(mktemp_in_workspace)
+  output_file=$(mktemp_in_workspace)
+  if [[ -n "$default_value" ]]; then
+    printf 'input\tCurrent default: %s\tEdit the query field or press Enter to keep the default.\n' "$default_value" > "$list_file"
+  else
+    printf 'input\tType a value\tEdit the query field, then press Enter.\n' > "$list_file"
+  fi
+
+  if ! env FZF_DEFAULT_OPTS= fzf "${args[@]}" < "$list_file" > "$output_file"; then
+    rm -f -- "$list_file" "$output_file"
+    die "Cancelled by user."
+  fi
+
+  mapfile -t fzf_lines < "$output_file"
+  rm -f -- "$list_file" "$output_file"
+  query=${fzf_lines[0]:-}
+  query=$(sanitize_reply "$query")
+  if [[ -z "$query" && -n "$default_value" ]]; then
+    query=$default_value
+  fi
+  result_ref=$query
 }
 
 choose_menu() {
@@ -1637,15 +1742,6 @@ collect_maintenance_options() {
     INSTALL_NYX=0
   fi
 
-  if ! ((PLAIN_TUI)) && ! command_exists fzf; then
-    info "fzf enables searchable menus and nicer MyFamily selectors on future runs."
-    if ask_yes_no "Install fzf after the final review?" "yes"; then
-      INSTALL_FZF=1
-    else
-      INSTALL_FZF=0
-    fi
-  fi
-
   collect_firewall_options
 
   info "SafeLogging stays enabled. The optional Tor syscall sandbox adds Linux hardening."
@@ -2340,6 +2436,7 @@ save_myfamily_changes() {
 
   family_csv=$(format_myfamily_csv "${family_array[@]}")
   printf '\n'
+  info "Tor's documented MyFamily syntax writes each relay fingerprint with a leading '$'."
   step_prefix
   printf '%s\n' "Proposed MyFamily line:"
   step_prefix
@@ -2375,6 +2472,7 @@ manage_myfamily() {
 
   info "Tor clients use MyFamily fingerprints to avoid choosing multiple relays controlled by the same operator in one circuit."
   info "Nicknames are not unique. This tool resolves nicknames through Tor Metrics and asks you to confirm the exact fingerprint."
+  info "The saved torrc line will prefix each fingerprint with '$', which is Tor's documented MyFamily format."
 
   if local_fp=$(local_relay_fingerprint); then
     local_fp=$(normalize_fingerprint "$local_fp")
@@ -3417,7 +3515,15 @@ show_summary() {
   fi
   printf '%bAutomatic updates%b: %s\n' "$BOLD" "$RESET" "$([[ $ENABLE_AUTO_UPDATES -eq 1 ]] && printf yes || printf no)"
   printf '%bInstall Nyx%b: %s\n' "$BOLD" "$RESET" "$([[ $INSTALL_NYX -eq 1 ]] && printf yes || printf no)"
-  printf '%bInstall fzf%b: %s\n' "$BOLD" "$RESET" "$([[ $INSTALL_FZF -eq 1 ]] && printf yes || printf no)"
+  if tui_available; then
+    printf '%bfzf interface%b: active\n' "$BOLD" "$RESET"
+  elif ((PLAIN_TUI)) && command_exists fzf; then
+    printf '%bfzf interface%b: installed, disabled by --plain\n' "$BOLD" "$RESET"
+  elif command_exists fzf; then
+    printf '%bfzf interface%b: installed, unavailable without a readable terminal\n' "$BOLD" "$RESET"
+  else
+    printf '%bfzf interface%b: not installed; plain line mode\n' "$BOLD" "$RESET"
+  fi
   printf '%bFirewall change%b: %s (%s)\n' "$BOLD" "$RESET" "$([[ $ENABLE_FIREWALL -eq 1 ]] && printf yes || printf no)" "$FIREWALL_KIND"
   if ((INSTALL_UFW)); then
     printf '%bInstall UFW%b: yes\n' "$BOLD" "$RESET"
@@ -3441,9 +3547,6 @@ show_summary() {
   printf '  - Install deb.torproject.org-keyring if apt publishes it for %s.\n' "$OS_CODENAME"
   if ((INSTALL_NYX)); then
     printf '  - Install nyx for terminal relay monitoring.\n'
-  fi
-  if ((INSTALL_FZF)); then
-    printf '  - Install fzf for searchable selector menus on future runs.\n'
   fi
   if [[ "$RELAY_MODE" == "exit" && "$CONFIGURE_UNBOUND" -eq 1 ]]; then
     printf '  - Install Unbound and switch %s to the local resolver.\n' "$RESOLV_CONF_PATH"

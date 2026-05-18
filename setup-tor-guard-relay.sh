@@ -7,14 +7,17 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.3.2"
+VERSION="1.4.0"
 DRY_RUN=0
+USE_WHIPTAIL=0
+PLAIN_TUI=0
 
 TMP_DIR=""
 TIMESTAMP=""
 BACKUPS_CREATED=()
 STEP_NUMBER=0
 CURRENT_STEP_LABEL=""
+CURRENT_STEP_TITLE=""
 SELECTED_RELAY_FINGERPRINT=""
 
 OS_ID=""
@@ -131,11 +134,13 @@ Interactively configure a Tor relay on a fresh Debian or Ubuntu VPS.
 Usage:
   ./${SCRIPT_NAME}
   ./${SCRIPT_NAME} --dry-run
+  ./${SCRIPT_NAME} --plain
   ./${SCRIPT_NAME} --help
 
 Options:
   --dry-run   Prompt normally and print the system changes that would be made,
               without installing packages or writing system files.
+  --plain     Use the built-in line interface instead of the whiptail TUI.
   --help      Show this help text and exit.
   --version   Show the script version and exit.
 
@@ -154,6 +159,9 @@ parse_args() {
     case "$1" in
       --dry-run)
         DRY_RUN=1
+        ;;
+      --plain|--no-tui)
+        PLAIN_TUI=1
         ;;
       --help|-h)
         print_help
@@ -176,13 +184,14 @@ parse_args() {
 banner() {
   printf '\n%bTor Relay Setup%b %s\n' "$BOLD$CYAN" "$RESET" "$VERSION"
   printf '%s\n' "Guided installer for public Guard/middle and exit relays."
-  printf '%s\n\n' "It will show a summary before making privileged changes."
+  printf '%s\n\n' "It may install whiptail for the UI; relay changes are reviewed before apply."
 }
 
 section() {
   STEP_NUMBER=$((STEP_NUMBER + 1))
   CURRENT_STEP_LABEL=$(printf '%02d' "$STEP_NUMBER")
-  printf '\n%b[%s]%b %b+--%b %b%s%b\n' "$CYAN" "$CURRENT_STEP_LABEL" "$RESET" "$DIM" "$RESET" "$BOLD$BLUE" "$1" "$RESET"
+  CURRENT_STEP_TITLE=$1
+  printf '\n%b[%s]%b %b+--%b %b%s%b\n' "$CYAN" "$CURRENT_STEP_LABEL" "$RESET" "$DIM" "$RESET" "$BOLD$BLUE" "$CURRENT_STEP_TITLE" "$RESET"
 }
 
 step_prefix() {
@@ -222,6 +231,53 @@ die() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+tui_available() {
+  ((USE_WHIPTAIL)) && command_exists whiptail && [[ -e /dev/tty && -r /dev/tty ]]
+}
+
+dialog_title() {
+  if [[ -n "${CURRENT_STEP_LABEL:-}" && -n "${CURRENT_STEP_TITLE:-}" ]]; then
+    printf '%s [%s] %s' "$SCRIPT_NAME" "$CURRENT_STEP_LABEL" "$CURRENT_STEP_TITLE"
+  else
+    printf '%s %s' "$SCRIPT_NAME" "$VERSION"
+  fi
+}
+
+bootstrap_tui() {
+  ((PLAIN_TUI)) && {
+    info "Plain terminal mode selected."
+    return 0
+  }
+
+  if command_exists whiptail; then
+    USE_WHIPTAIL=1
+    success "TUI mode enabled with whiptail."
+    return 0
+  fi
+
+  if ((DRY_RUN)); then
+    warn "whiptail is not installed. Dry run will use the built-in line interface."
+    info "Would install whiptail for the full TUI during a real run."
+    return 0
+  fi
+
+  command_exists df && {
+    check_path_capacity /var/lib/apt/lists 512000 2048
+    check_path_capacity /var/cache/apt/archives 512000 2048
+    check_path_capacity /var 512000 2048
+  }
+
+  info "Installing whiptail for the interactive TUI."
+  if env DEBIAN_FRONTEND=noninteractive apt-get update \
+    && env DEBIAN_FRONTEND=noninteractive apt-get install -y whiptail \
+    && command_exists whiptail; then
+    USE_WHIPTAIL=1
+    success "TUI mode enabled with whiptail."
+  else
+    warn "Could not install whiptail. Falling back to the built-in line interface."
+  fi
 }
 
 python_command() {
@@ -364,6 +420,21 @@ prompt_line() {
   local default_value=${2:-}
   local reply
 
+  if tui_available; then
+    if ! reply=$(whiptail \
+      --title "$(dialog_title)" \
+      --inputbox "$prompt" 10 76 "$default_value" \
+      3>&1 1>&2 2>&3 < /dev/tty); then
+      die "Cancelled by user."
+    fi
+    reply=$(sanitize_reply "$reply")
+    if [[ -z "$reply" && -n "$default_value" ]]; then
+      reply=$default_value
+    fi
+    trim "$reply"
+    return 0
+  fi
+
   prompt_step_prefix
   if [[ -n "$default_value" ]]; then
     prompt_printf '%b%s%b [%s]: ' "$BOLD" "$prompt" "$RESET" "$default_value"
@@ -409,6 +480,17 @@ ask_yes_no() {
   local suffix
   local reply
 
+  if tui_available; then
+    local whiptail_args=(--title "$(dialog_title)")
+    if [[ "$default_answer" == "no" ]]; then
+      whiptail_args+=(--defaultno)
+    fi
+    if whiptail "${whiptail_args[@]}" --yesno "$prompt" 10 76 < /dev/tty; then
+      return 0
+    fi
+    return 1
+  fi
+
   case "$default_answer" in
     yes) suffix="[Y/n]" ;;
     no) suffix="[y/N]" ;;
@@ -432,6 +514,67 @@ ask_yes_no() {
       n|no) return 1 ;;
       *) warn "Please answer yes or no." ;;
     esac
+  done
+}
+
+choose_menu() {
+  local result_name=$1
+  local title=$2
+  local default_choice=$3
+  shift 3
+  local -n result_ref=$result_name
+  local -a options=("$@")
+  local -a whiptail_options=()
+  local menu_reply
+  local key
+  local label
+  local description
+  local i
+
+  if tui_available; then
+    for ((i = 0; i < ${#options[@]}; i += 3)); do
+      key=${options[i]}
+      label=${options[i + 1]}
+      description=${options[i + 2]}
+      whiptail_options+=("$key" "${label}${description:+ - ${description}}")
+    done
+
+    if ! menu_reply=$(whiptail \
+      --title "$(dialog_title)" \
+      --default-item "$default_choice" \
+      --menu "$title" 20 78 10 \
+      "${whiptail_options[@]}" \
+      3>&1 1>&2 2>&3 < /dev/tty); then
+      die "Cancelled by user."
+    fi
+    result_ref=$menu_reply
+    return 0
+  fi
+
+  while true; do
+    step_prefix >&2
+    printf '%b%s%b\n' "$BOLD" "$title" "$RESET" >&2
+    for ((i = 0; i < ${#options[@]}; i += 3)); do
+      key=${options[i]}
+      label=${options[i + 1]}
+      description=${options[i + 2]}
+      step_prefix >&2
+      printf '  %-4s %s' "$key)" "$label" >&2
+      if [[ -n "$description" ]]; then
+        printf ' - %s' "$description" >&2
+      fi
+      printf '\n' >&2
+    done
+
+    menu_reply=$(prompt_line "Choose" "$default_choice")
+    for ((i = 0; i < ${#options[@]}; i += 3)); do
+      key=${options[i]}
+      if [[ "${menu_reply,,}" == "${key,,}" ]]; then
+        result_ref=$key
+        return 0
+      fi
+    done
+    warn "Choose one of the listed actions."
   done
 }
 
@@ -1066,38 +1209,27 @@ collect_traffic_headroom() {
 }
 
 collect_traffic_billing_rule() {
-  info "Provider traffic quotas are counted differently. Choose the closest match."
-  step_prefix
-  printf '%s\n' "  1) Combined inbound + outbound traffic (conservative default)"
-  step_prefix
-  printf '%s\n' "  2) Outbound traffic only"
-  step_prefix
-  printf '%s\n' "  3) Per-direction / Tor default max(in,out)"
+  local choice
 
-  while true; do
-    local choice
-    choice=$(prompt_line "Traffic quota style" "1")
-    case "${choice,,}" in
-      1|sum|combined|total|in+out)
-        MONTHLY_TRAFFIC_BILLING_RULE="sum"
-        ACCOUNTING_RULE="sum"
-        return 0
-        ;;
-      2|out|outbound|egress)
-        MONTHLY_TRAFFIC_BILLING_RULE="out"
-        ACCOUNTING_RULE="out"
-        return 0
-        ;;
-      3|max|direction|per-direction|perdirection)
-        MONTHLY_TRAFFIC_BILLING_RULE="max"
-        ACCOUNTING_RULE="max"
-        return 0
-        ;;
-      *)
-        warn "Choose 1, 2, or 3."
-        ;;
-    esac
-  done
+  choose_menu choice "How does your provider count the monthly traffic quota?" "1" \
+    "1" "Combined inbound + outbound" "Conservative default" \
+    "2" "Outbound traffic only" "Common for some VPS providers" \
+    "3" "Per-direction max(in,out)" "Matches Tor's default accounting rule"
+
+  case "$choice" in
+    1)
+      MONTHLY_TRAFFIC_BILLING_RULE="sum"
+      ACCOUNTING_RULE="sum"
+      ;;
+    2)
+      MONTHLY_TRAFFIC_BILLING_RULE="out"
+      ACCOUNTING_RULE="out"
+      ;;
+    3)
+      MONTHLY_TRAFFIC_BILLING_RULE="max"
+      ACCOUNTING_RULE="max"
+      ;;
+  esac
 }
 
 calculate_steady_monthly_limits() {
@@ -1214,41 +1346,29 @@ collect_bandwidth() {
 
   info "Tor AccountingMax is a hard quota and can hibernate the relay when exhausted."
   info "Steady monthly mode calculates RelayBandwidthRate and RelayBandwidthBurst from your VPS traffic budget."
-  step_prefix
-  printf '%s\n' "  1) Steady monthly budget (recommended if your VPS has a traffic cap)"
-  step_prefix
-  printf '%s\n' "  2) Manual RelayBandwidthRate / RelayBandwidthBurst"
-  step_prefix
-  printf '%s\n' "  3) Hard monthly AccountingMax only"
-  step_prefix
-  printf '%s\n' "  4) No relay-specific bandwidth cap"
 
-  while true; do
-    local choice
-    choice=$(prompt_line "Bandwidth mode" "1")
-    case "${choice,,}" in
-      1|steady|budget|monthly)
-        collect_steady_monthly_bandwidth
-        return 0
-        ;;
-      2|manual|rate)
-        collect_manual_relay_bandwidth
-        return 0
-        ;;
-      3|accounting|cap|hard)
-        collect_hard_accounting_cap
-        return 0
-        ;;
-      4|none|no)
-        BANDWIDTH_MODE="none"
-        info "No relay-specific bandwidth cap will be written."
-        return 0
-        ;;
-      *)
-        warn "Choose 1, 2, 3, or 4."
-        ;;
-    esac
-  done
+  local choice
+  choose_menu choice "Choose a bandwidth mode" "1" \
+    "1" "Steady monthly budget" "Recommended for VPS traffic caps" \
+    "2" "Manual rate and burst" "Set RelayBandwidthRate/Burst yourself" \
+    "3" "Hard monthly AccountingMax only" "May hibernate when exhausted" \
+    "4" "No relay-specific cap" "Let Tor use available bandwidth"
+
+  case "$choice" in
+    1)
+      collect_steady_monthly_bandwidth
+      ;;
+    2)
+      collect_manual_relay_bandwidth
+      ;;
+    3)
+      collect_hard_accounting_cap
+      ;;
+    4)
+      BANDWIDTH_MODE="none"
+      info "No relay-specific bandwidth cap will be written."
+      ;;
+  esac
 }
 
 collect_maintenance_options() {
@@ -1664,7 +1784,11 @@ select_relay_fingerprint() {
   if [[ -n "$selection_hint" ]]; then
     selection=$selection_hint
   else
-    selection=$(prompt_line "Select the correct relay number, or blank to skip")
+    local -a candidate_options=()
+    while IFS=$'\t' read -r index fingerprint nickname running addresses; do
+      candidate_options+=("$index" "$nickname" "${fingerprint} running:${running} ${addresses:-no addresses shown}")
+    done < "$candidates_file"
+    choose_menu selection "Select the exact relay to add to MyFamily" "1" "${candidate_options[@]}"
   fi
 
   [[ -n "$selection" ]] || return 1
@@ -1825,8 +1949,21 @@ remove_myfamily_member() {
     return 0
   fi
 
-  print_myfamily_editor_list "$array_name" "$local_fp"
-  selection=$(prompt_line "Fingerprint number to remove (blank to cancel)")
+  if tui_available; then
+    local -a remove_options=()
+    for ((index = 0; index < ${#family_array[@]}; index++)); do
+      removed=${family_array[$index]}
+      if [[ -n "$local_fp" && "$removed" == "$local_fp" ]]; then
+        remove_options+=("$((index + 1))" "$removed" "this relay, pinned")
+      else
+        remove_options+=("$((index + 1))" "$removed" "remove from MyFamily")
+      fi
+    done
+    choose_menu selection "Select a fingerprint to remove" "1" "${remove_options[@]}"
+  else
+    print_myfamily_editor_list "$array_name" "$local_fp"
+    selection=$(prompt_line "Fingerprint number to remove (blank to cancel)")
+  fi
   [[ -n "$selection" ]] || return 0
 
   if ! valid_integer "$selection" || ((10#$selection < 1 || 10#$selection > ${#family_array[@]})); then
@@ -1926,38 +2063,30 @@ manage_myfamily() {
 
   while true; do
     print_myfamily_editor_list family_fingerprints "$local_fp"
-    step_prefix
-    printf '%s\n' "  a) Add relay by nickname/fingerprint"
-    step_prefix
-    printf '%s\n' "  r) Remove relay"
-    step_prefix
-    printf '%s\n' "  c) Check published status"
-    step_prefix
-    printf '%s\n' "  s) Save and apply"
-    step_prefix
-    printf '%s\n' "  q) Discard and go back"
+    choose_menu choice "MyFamily editor actions" "a" \
+      "a" "Add relay" "Nickname or 40-char fingerprint" \
+      "r" "Remove relay" "Delete by list number" \
+      "c" "Check published status" "Query Tor Metrics Onionoo" \
+      "s" "Save and apply" "Write torrc and optionally restart Tor" \
+      "q" "Discard and go back" "Leave torrc unchanged"
 
-    choice=$(prompt_line "Choose an action" "a")
-    case "${choice,,}" in
-      a|add|1)
+    case "$choice" in
+      a)
         add_myfamily_member family_fingerprints
         ;;
-      r|remove|delete|2)
+      r)
         remove_myfamily_member family_fingerprints "$local_fp"
         ;;
-      c|check|status|3)
+      c)
         lookup_family_status "${family_fingerprints[@]}"
         ;;
-      s|save|apply|4)
+      s)
         save_myfamily_changes family_fingerprints "$local_fp"
         return 0
         ;;
-      q|quit|back|discard|5|"")
+      q)
         warn "Discarded unsaved MyFamily changes."
         return 0
-        ;;
-      *)
-        warn "Choose a, r, c, s, or q."
         ;;
     esac
   done
@@ -2042,20 +2171,14 @@ repair_menu() {
 
   while true; do
     section "Repair Tools"
-    step_prefix
-    printf '%s\n' "  1) Verify torrc syntax"
-    step_prefix
-    printf '%s\n' "  2) Restart ${TOR_SERVICE}"
-    step_prefix
-    printf '%s\n' "  3) Show recent Tor logs"
-    step_prefix
-    printf '%s\n' "  4) Check ORPort self-test logs"
-    step_prefix
-    printf '%s\n' "  5) Configure/repair local firewall"
-    step_prefix
-    printf '%s\n' "  6) Back"
+    choose_menu choice "Choose a repair action" "6" \
+      "1" "Verify torrc syntax" "Run tor --verify-config" \
+      "2" "Restart Tor" "Enable/restart ${TOR_SERVICE} and verify" \
+      "3" "Show recent Tor logs" "Last 80 journal lines" \
+      "4" "Check ORPort self-test" "Inspect recent reachability logs" \
+      "5" "Configure or repair firewall" "UFW/firewalld/nftables path" \
+      "6" "Back" "Return to existing relay tools"
 
-    choice=$(prompt_line "Choose an action" "6")
     case "$choice" in
       1)
         if ! verify_tor_config; then
@@ -2088,9 +2211,6 @@ repair_menu() {
       6|"")
         return 0
         ;;
-      *)
-        warn "Choose 1, 2, 3, 4, 5, or 6."
-        ;;
     esac
   done
 }
@@ -2103,18 +2223,13 @@ existing_relay_menu() {
   while true; do
     section "Existing Relay Tools"
     info "An existing Tor relay configuration or active Tor service was detected."
-    step_prefix
-    printf '%s\n' "  1) Manage MyFamily"
-    step_prefix
-    printf '%s\n' "  2) Run relay health check"
-    step_prefix
-    printf '%s\n' "  3) Repair tools"
-    step_prefix
-    printf '%s\n' "  4) Run full guided setup again"
-    step_prefix
-    printf '%s\n' "  5) Exit"
+    choose_menu choice "What would you like to do?" "1" \
+      "1" "Manage MyFamily" "Add, remove, verify, and save family fingerprints" \
+      "2" "Run relay health check" "Service, config, ORPort, logs, MyFamily" \
+      "3" "Repair tools" "Config, restart, logs, firewall" \
+      "4" "Run full guided setup again" "Reconfigure this relay" \
+      "5" "Exit" "Make no changes"
 
-    choice=$(prompt_line "Choose an action" "1")
     case "$choice" in
       1)
         manage_myfamily
@@ -2132,9 +2247,6 @@ existing_relay_menu() {
         ;;
       5|"")
         exit 0
-        ;;
-      *)
-        warn "Choose 1, 2, 3, 4, or 5."
         ;;
     esac
   done
@@ -2585,6 +2697,7 @@ main() {
 
   banner
   require_supported_system
+  bootstrap_tui
   if existing_relay_menu; then
     exit 0
   fi

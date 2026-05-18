@@ -9,7 +9,7 @@
 
 This repo is a small, opinionated Bash installer for turning a fresh Debian or Ubuntu VPS into a public Tor relay. It can configure a Guard/middle relay or, when you intentionally choose it, an exit relay with the Tor Project's recommended exit basics. It is meant for the person who knows the practical details, like a relay nickname, contact address, bandwidth expectations, whether the server has IPv6, and whether this VPS is supposed to exit traffic, but does not want to hand-edit `torrc` at midnight.
 
-The terminal flow uses numbered timeline-style steps, so you always know where you are in the setup.
+The installer uses a `whiptail` TUI when available, and installs `whiptail` automatically on real Debian/Ubuntu runs when it is missing. That small UI dependency may be installed before the relay configuration review; the actual Tor/firewall/relay changes are still shown before apply. Use `--plain` if you want the built-in line interface instead.
 
 If the script detects an existing relay, it opens an operator tools menu instead of forcing you through the full setup again. From there you can manage `MyFamily`, run health checks, or use basic repair actions.
 
@@ -69,6 +69,12 @@ Show help:
 ./setup-tor-guard-relay.sh --help
 ```
 
+Plain terminal mode:
+
+```bash
+sudo ./setup-tor-guard-relay.sh --plain
+```
+
 ## Supported Systems
 
 The installer supports Debian and Ubuntu releases when the official Tor Project apt repository publishes packages for that release codename.
@@ -101,6 +107,7 @@ The installer walks through the choices that actually matter:
 - Bandwidth mode: steady monthly traffic budget, manual `RelayBandwidthRate` / `RelayBandwidthBurst`, hard monthly `AccountingMax`, or no relay-specific cap
 - Maximum monthly traffic such as `10TB`, provider quota style, and safety headroom when using the steady budget mode
 - Existing relay tools: MyFamily management, health checks, and repair actions without redoing the full installer
+- TUI dependency bootstrap: install `whiptail` for menus/forms, or use `--plain`
 - Automatic package updates
 - Optional Nyx install for terminal relay monitoring
 - Firewall setup: use an existing firewall manager, or optionally install UFW, allow SSH first, allow the ORPort, and enable UFW
@@ -126,6 +133,7 @@ When confirmed, the script:
 - Optionally installs and starts `unbound` for exit relay DNS, backs up `/etc/resolv.conf`, and points the system resolver at `127.0.0.1`.
 - Optionally calculates steady bandwidth limits from a monthly traffic budget, including `RelayBandwidthRate`, `RelayBandwidthBurst`, `AccountingRule`, and `AccountingMax`.
 - When run on an existing relay, can resolve MyFamily members through Tor Metrics Onionoo by nickname or full fingerprint, then back up and update the `MyFamily` line in `/etc/tor/torrc`.
+- Installs `whiptail` from apt when needed for the TUI, unless `--plain` or `--dry-run` is used.
 - Optionally installs and configures `unattended-upgrades` for security and Tor updates.
 - Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
 - If no supported local firewall manager is installed, can install UFW, add an SSH allow rule before anything else, add the ORPort allow rule, and then enable UFW.

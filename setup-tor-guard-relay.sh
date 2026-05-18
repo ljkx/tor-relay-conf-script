@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.2.2"
+VERSION="1.3.0"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -15,6 +15,7 @@ TIMESTAMP=""
 BACKUPS_CREATED=()
 STEP_NUMBER=0
 CURRENT_STEP_LABEL=""
+SELECTED_RELAY_FINGERPRINT=""
 
 OS_ID=""
 OS_VERSION_ID=""
@@ -66,6 +67,7 @@ UNATTENDED_TOR_PATH="/etc/apt/apt.conf.d/52tor-relay-unattended-upgrades"
 AUTO_UPGRADES_PATH="/etc/apt/apt.conf.d/20auto-upgrades"
 TOR_SERVICE="tor@default"
 RESOLV_CONF_PATH="/etc/resolv.conf"
+ONIONOO_BASE_URL="https://onionoo.torproject.org"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   BOLD=$'\033[1m'
@@ -139,7 +141,8 @@ Supported targets:
   official Tor Project apt repository.
 
 This script can configure either a Guard/middle relay or an exit relay.
-It shows the generated torrc and asks for confirmation before applying.
+If an existing relay is detected, it opens tools for MyFamily management,
+health checks, repair actions, or rerunning the full guided setup.
 EOF
 }
 
@@ -190,11 +193,7 @@ prompt_step_prefix() {
     return 0
   fi
 
-  if [[ -w /dev/tty ]]; then
-    step_prefix > /dev/tty
-  else
-    step_prefix >&2
-  fi
+  step_prefix >&2
 }
 
 info() {
@@ -220,6 +219,20 @@ die() {
 
 command_exists() {
   command -v "$1" >/dev/null 2>&1
+}
+
+python_command() {
+  if command_exists python3 && python3 -c 'import json, sys' >/dev/null 2>&1; then
+    printf 'python3'
+    return 0
+  fi
+
+  if command_exists python && python -c 'import json, sys' >/dev/null 2>&1; then
+    printf 'python'
+    return 0
+  fi
+
+  return 1
 }
 
 apt_package_available() {
@@ -367,29 +380,24 @@ prompt_printf() {
   local format=$1
   shift
 
-  if [[ -w /dev/tty ]]; then
-    # shellcheck disable=SC2059
-    printf "$format" "$@" > /dev/tty
-  else
-    # shellcheck disable=SC2059
-    printf "$format" "$@" >&2
-  fi
+  # shellcheck disable=SC2059
+  printf "$format" "$@" >&2
 }
 
 read_reply() {
   local variable_name=$1
 
-  if [[ -r /dev/tty ]]; then
-    if ! IFS= read -r "$variable_name" < /dev/tty; then
-      die "No input received from the terminal."
+  if [[ -t 1 && -e /dev/tty && -r /dev/tty ]]; then
+    if IFS= read -r "$variable_name" < /dev/tty 2>/dev/null; then
+      return 0
     fi
-  elif [[ -t 0 ]]; then
-    if ! IFS= read -r "$variable_name"; then
-      die "No input received from stdin."
-    fi
-  else
-    die "Interactive input is required. Run from a terminal, or use --help for noninteractive usage."
   fi
+
+  if IFS= read -r "$variable_name"; then
+    return 0
+  fi
+
+  die "Interactive input is required. Run from a terminal, or use --help for noninteractive usage."
 }
 
 ask_yes_no() {
@@ -426,6 +434,17 @@ ask_yes_no() {
 
 valid_integer() {
   [[ $1 =~ ^[0-9]+$ ]]
+}
+
+valid_fingerprint() {
+  [[ $1 =~ ^\$?[A-Fa-f0-9]{40}$ ]]
+}
+
+normalize_fingerprint() {
+  local value=$1
+  value=${value#\$}
+  value=${value^^}
+  printf '%s' "$value"
 }
 
 valid_percent() {
@@ -1362,6 +1381,549 @@ install_file_if_changed() {
   fi
 }
 
+torrc_exists() {
+  [[ -s "$TORRC_PATH" ]]
+}
+
+tor_service_active() {
+  command_exists systemctl && systemctl is-active --quiet "$TOR_SERVICE" 2>/dev/null
+}
+
+existing_tor_relay_detected() {
+  if tor_service_active; then
+    return 0
+  fi
+
+  if torrc_exists && awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*ORPort[[:space:]]+/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$TORRC_PATH"; then
+    return 0
+  fi
+
+  return 1
+}
+
+read_torrc_first_orport() {
+  torrc_exists || return 1
+  awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*ORPort[[:space:]]+/ {
+      value = $2
+      gsub(/.*\]:/, "", value)
+      gsub(/.*:/, "", value)
+      if (value ~ /^[0-9]+$/) {
+        print value
+        exit
+      }
+    }
+  ' "$TORRC_PATH"
+}
+
+tor_datadirectory() {
+  local value
+
+  value=""
+  if torrc_exists; then
+    value=$(awk '
+      /^[[:space:]]*#/ { next }
+      /^[[:space:]]*DataDirectory[[:space:]]+/ {
+        print $2
+        exit
+      }
+    ' "$TORRC_PATH" || true)
+  fi
+  printf '%s' "${value:-/var/lib/tor}"
+}
+
+local_relay_fingerprint() {
+  local data_dir
+  local fingerprint_file
+
+  data_dir=$(tor_datadirectory)
+  fingerprint_file="${data_dir%/}/fingerprint"
+  [[ -r "$fingerprint_file" ]] || return 1
+  awk '{ print toupper($NF); exit }' "$fingerprint_file"
+}
+
+torrc_myfamily_fingerprints() {
+  torrc_exists || return 0
+  awk '
+    /^[[:space:]]*#/ { next }
+    /^[[:space:]]*MyFamily[[:space:]]+/ {
+      $1 = ""
+      gsub(/#.*$/, "")
+      gsub(/,/, " ")
+      for (i = 1; i <= NF; i++) {
+        value = toupper($i)
+        sub(/^\$/, "", value)
+        if (value ~ /^[A-F0-9]{40}$/) {
+          print value
+        }
+      }
+    }
+  ' "$TORRC_PATH"
+}
+
+append_unique_fingerprint() {
+  local -n target_array=$1
+  local fingerprint
+  local existing
+
+  fingerprint=$(normalize_fingerprint "$2")
+  for existing in "${target_array[@]}"; do
+    [[ "$existing" == "$fingerprint" ]] && return 0
+  done
+  target_array+=("$fingerprint")
+}
+
+fetch_url_to_file() {
+  local url=$1
+  local output=$2
+
+  if command_exists curl; then
+    curl -fsSL --connect-timeout 10 --max-time 30 "$url" -o "$output"
+  elif command_exists wget; then
+    wget -qO "$output" "$url"
+  else
+    die "curl or wget is required for Tor Metrics relay lookup."
+  fi
+}
+
+lookup_relay_candidates() {
+  local query=$1
+  local output=$2
+  local json_file="$TMP_DIR/onionoo-summary.json"
+  local url
+  local python_bin
+
+  if valid_fingerprint "$query"; then
+    query=$(normalize_fingerprint "$query")
+    printf '1\t%s\t%s\t%s\t%s\n' "$query" "manual fingerprint" "unknown" "manual entry" > "$output"
+    return 0
+  fi
+
+  if ! valid_nickname "$query"; then
+    warn "Relay lookups by nickname use Tor nickname syntax: 1-19 letters/numbers."
+    return 1
+  fi
+
+  python_bin=$(python_command) || die "python3 or python is required for safe Onionoo JSON parsing. Install python3 or enter a full relay fingerprint."
+
+  url="${ONIONOO_BASE_URL}/summary?type=relay&search=${query}&limit=20"
+  info "Looking up '${query}' with Tor Metrics Onionoo."
+  fetch_url_to_file "$url" "$json_file"
+
+  "$python_bin" - "$json_file" "$query" > "$output" <<'PY'
+import json
+import sys
+
+path, query = sys.argv[1], sys.argv[2].lower()
+with open(path, "r", encoding="utf-8") as handle:
+    document = json.load(handle)
+
+relays = document.get("relays", [])
+relays.sort(key=lambda relay: (
+    relay.get("n", "").lower() != query,
+    not relay.get("r", False),
+    relay.get("n", "").lower(),
+    relay.get("f", ""),
+))
+
+for index, relay in enumerate(relays, 1):
+    nickname = relay.get("n", "")
+    fingerprint = relay.get("f", "")
+    running = "yes" if relay.get("r", False) else "no"
+    addresses = ",".join(relay.get("a", [])[:3])
+    print(f"{index}\t{fingerprint}\t{nickname}\t{running}\t{addresses}")
+PY
+}
+
+select_relay_fingerprint() {
+  local query=$1
+  local candidates_file="$TMP_DIR/onionoo-candidates.tsv"
+  local selection_hint=""
+  local selection
+  local row_count=0
+  local index
+  local fingerprint
+  local nickname
+  local running
+  local addresses
+
+  SELECTED_RELAY_FINGERPRINT=""
+
+  if [[ "$query" =~ ^(.+)[[:space:]]+#?([0-9]+)$ ]]; then
+    query=$(trim "${BASH_REMATCH[1]}")
+    selection_hint=${BASH_REMATCH[2]}
+  fi
+
+  lookup_relay_candidates "$query" "$candidates_file" || return 1
+
+  row_count=$(awk 'END { print NR + 0 }' "$candidates_file")
+  if ((row_count == 0)); then
+    warn "No relay candidates were found for '${query}'. Try a full fingerprint or wait until the relay appears in Relay Search."
+    return 1
+  fi
+
+  printf '\n'
+  step_prefix
+  printf '%s\n' "Relay candidates:"
+  while IFS=$'\t' read -r index fingerprint nickname running addresses; do
+    step_prefix
+    printf '  %s) %s  %s  running:%s  %s\n' "$index" "$nickname" "$fingerprint" "$running" "${addresses:-no addresses shown}"
+  done < "$candidates_file"
+
+  if [[ -n "$selection_hint" ]]; then
+    selection=$selection_hint
+  else
+    selection=$(prompt_line "Select the correct relay number, or blank to skip")
+  fi
+
+  [[ -n "$selection" ]] || return 1
+  if ! valid_integer "$selection" || ((10#$selection < 1 || 10#$selection > row_count)); then
+    warn "Invalid relay selection: ${selection}"
+    return 1
+  fi
+
+  fingerprint=$(awk -F '\t' -v wanted="$selection" '$1 == wanted { print $2; exit }' "$candidates_file")
+  nickname=$(awk -F '\t' -v wanted="$selection" '$1 == wanted { print $3; exit }' "$candidates_file")
+  running=$(awk -F '\t' -v wanted="$selection" '$1 == wanted { print $4; exit }' "$candidates_file")
+  step_prefix
+  printf 'Selected: %s  %s  running:%s\n' "$nickname" "$fingerprint" "$running"
+
+  if ask_yes_no "Add this fingerprint to MyFamily?" "yes"; then
+    SELECTED_RELAY_FINGERPRINT=$fingerprint
+    return 0
+  fi
+
+  return 1
+}
+
+write_myfamily_to_torrc() {
+  local family_csv=$1
+  local temp_torrc="$TMP_DIR/torrc.myfamily"
+
+  torrc_exists || die "${TORRC_PATH} does not exist yet."
+
+  awk -v family_line="MyFamily ${family_csv}" '
+    /^[[:space:]]*#[[:space:]]*Managed MyFamily/ { next }
+    /^[[:space:]]*MyFamily[[:space:]]+/ { next }
+    {
+      print
+      if (!inserted && $0 ~ /^[[:space:]]*ContactInfo[[:space:]]+/) {
+        print ""
+        print "# Managed MyFamily: relays controlled by this operator. Keep synced on every family member."
+        print family_line
+        inserted = 1
+      }
+    }
+    END {
+      if (!inserted) {
+        print ""
+        print "# Managed MyFamily: relays controlled by this operator. Keep synced on every family member."
+        print family_line
+      }
+    }
+  ' "$TORRC_PATH" > "$temp_torrc"
+
+  install_file_if_changed "$temp_torrc" "$TORRC_PATH" "0644"
+}
+
+lookup_family_status() {
+  local -a fingerprints=("$@")
+  local lookup
+  local json_file="$TMP_DIR/onionoo-family-status.json"
+  local count
+  local python_bin
+
+  ((${#fingerprints[@]})) || return 0
+  python_bin=$(python_command) || {
+    warn "python3/python is unavailable; skipping Onionoo MyFamily status lookup."
+    return 0
+  }
+
+  lookup=$(IFS=,; printf '%s' "${fingerprints[*]}")
+  fetch_url_to_file "${ONIONOO_BASE_URL}/summary?type=relay&lookup=${lookup}" "$json_file" || {
+    warn "Could not fetch Onionoo family status."
+    return 0
+  }
+
+  count=$("$python_bin" - "$json_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    document = json.load(handle)
+
+for relay in document.get("relays", []):
+    nickname = relay.get("n", "")
+    fingerprint = relay.get("f", "")
+    running = "yes" if relay.get("r", False) else "no"
+    addresses = ",".join(relay.get("a", [])[:2])
+    print(f"{nickname}\t{fingerprint}\trunning:{running}\t{addresses}")
+PY
+)
+
+  if [[ -z "$count" ]]; then
+    warn "Onionoo did not return status for the configured MyFamily fingerprints yet."
+    return 0
+  fi
+
+  step_prefix
+  printf '%s\n' "Published relay status for configured MyFamily fingerprints:"
+  while IFS=$'\t' read -r nickname fingerprint running addresses; do
+    step_prefix
+    printf '  %s  %s  %s  %s\n' "$nickname" "$fingerprint" "$running" "${addresses:-no addresses shown}"
+  done <<< "$count"
+}
+
+manage_myfamily() {
+  local local_fp=""
+  local entry
+  local resolved_fp
+  local family_csv
+  local current_orport
+  local -a family_fingerprints=()
+  local fingerprint
+
+  section "MyFamily Manager"
+  torrc_exists || die "${TORRC_PATH} does not exist yet. Run the guided setup first."
+
+  info "Tor clients use MyFamily fingerprints to avoid choosing multiple relays controlled by the same operator in one circuit."
+  info "Nicknames are not unique. This tool resolves nicknames through Tor Metrics and asks you to confirm the exact fingerprint."
+
+  if local_fp=$(local_relay_fingerprint); then
+    append_unique_fingerprint family_fingerprints "$local_fp"
+    success "Local relay fingerprint: ${local_fp}"
+  else
+    warn "Could not read the local relay fingerprint. Start Tor first or check $(tor_datadirectory)/fingerprint."
+  fi
+
+  while IFS= read -r fingerprint; do
+    append_unique_fingerprint family_fingerprints "$fingerprint"
+  done < <(torrc_myfamily_fingerprints)
+
+  if ((${#family_fingerprints[@]})); then
+    step_prefix
+    printf '%s\n' "Current MyFamily fingerprints:"
+    for fingerprint in "${family_fingerprints[@]}"; do
+      step_prefix
+      printf '  %s\n' "$fingerprint"
+    done
+    lookup_family_status "${family_fingerprints[@]}"
+  else
+    info "No existing MyFamily fingerprints found in ${TORRC_PATH}."
+  fi
+
+  while true; do
+    entry=$(prompt_line "Relay nickname or 40-char fingerprint to add (blank when done)")
+    [[ -n "$entry" ]] || break
+
+    if select_relay_fingerprint "$entry"; then
+      resolved_fp=$SELECTED_RELAY_FINGERPRINT
+      append_unique_fingerprint family_fingerprints "$resolved_fp"
+      success "Added ${resolved_fp}."
+    else
+      warn "No fingerprint was added for '${entry}'."
+    fi
+  done
+
+  ((${#family_fingerprints[@]})) || die "No MyFamily fingerprints selected."
+
+  family_csv=$(IFS=,; printf '%s' "${family_fingerprints[*]}")
+  printf '\n'
+  step_prefix
+  printf '%s\n' "Proposed MyFamily line:"
+  step_prefix
+  printf '  MyFamily %s\n' "$family_csv"
+  warn "Apply this same MyFamily value on every relay controlled by you. One-sided family entries are incomplete until other relays publish matching configs."
+
+  if ! ask_yes_no "Write this MyFamily line to ${TORRC_PATH}?" "no"; then
+    die "Aborted before changing MyFamily."
+  fi
+
+  TIMESTAMP=${TIMESTAMP:-$(date -u '+%Y%m%dT%H%M%SZ')}
+  write_myfamily_to_torrc "$family_csv"
+  verify_tor_config
+
+  current_orport=$(read_torrc_first_orport || true)
+  OR_PORT=${current_orport:-$OR_PORT}
+  if ask_yes_no "Restart Tor now to apply MyFamily?" "yes"; then
+    restart_and_verify_tor
+  else
+    warn "MyFamily will not be active until Tor reloads or restarts."
+  fi
+}
+
+show_myfamily_status() {
+  local -a fingerprints=()
+  local fingerprint
+
+  section "MyFamily Status"
+  while IFS= read -r fingerprint; do
+    append_unique_fingerprint fingerprints "$fingerprint"
+  done < <(torrc_myfamily_fingerprints)
+
+  if ((${#fingerprints[@]} == 0)); then
+    warn "No MyFamily line is configured in ${TORRC_PATH}."
+    return 0
+  fi
+
+  step_prefix
+  printf '%s\n' "Configured MyFamily fingerprints:"
+  for fingerprint in "${fingerprints[@]}"; do
+    step_prefix
+    printf '  %s\n' "$fingerprint"
+  done
+  lookup_family_status "${fingerprints[@]}"
+  info "Published family changes can take hours to show up in consensus and Relay Search."
+}
+
+run_relay_health_check() {
+  local current_orport
+  local local_fp
+
+  section "Relay Health Check"
+
+  if torrc_exists; then
+    success "Found ${TORRC_PATH}."
+  else
+    warn "${TORRC_PATH} does not exist."
+  fi
+
+  if local_fp=$(local_relay_fingerprint); then
+    success "Local relay fingerprint: ${local_fp}"
+  else
+    warn "Local relay fingerprint is not readable yet. New relays may need Tor to start once."
+  fi
+
+  if tor_service_active; then
+    success "${TOR_SERVICE} is active."
+  else
+    warn "${TOR_SERVICE} is not active."
+  fi
+
+  if ! verify_tor_config; then
+    warn "Tor configuration syntax check failed."
+  fi
+
+  current_orport=$(read_torrc_first_orport || true)
+  OR_PORT=${current_orport:-$OR_PORT}
+  if [[ -n "$current_orport" ]]; then
+    success "Configured ORPort: ${OR_PORT}"
+    if command_exists ss; then
+      if ss -H -ltn | awk '{ print $4 }' | grep -Eq "(^|:|\\])${OR_PORT}$"; then
+        success "A TCP listener is present on ${OR_PORT}."
+      else
+        warn "No TCP listener was found on ${OR_PORT}."
+      fi
+    else
+      warn "ss command not found; skipped listener check."
+    fi
+  else
+    warn "No ORPort was found in ${TORRC_PATH}."
+  fi
+
+  check_tor_orport_self_test "1 hour ago"
+  show_myfamily_status
+}
+
+repair_menu() {
+  local choice
+  local current_orport
+
+  while true; do
+    section "Repair Tools"
+    step_prefix
+    printf '%s\n' "  1) Verify torrc syntax"
+    step_prefix
+    printf '%s\n' "  2) Restart ${TOR_SERVICE}"
+    step_prefix
+    printf '%s\n' "  3) Show recent Tor logs"
+    step_prefix
+    printf '%s\n' "  4) Check ORPort self-test logs"
+    step_prefix
+    printf '%s\n' "  5) Back"
+
+    choice=$(prompt_line "Choose an action" "5")
+    case "$choice" in
+      1)
+        if ! verify_tor_config; then
+          warn "Tor configuration syntax check failed."
+        fi
+        ;;
+      2)
+        current_orport=$(read_torrc_first_orport || true)
+        OR_PORT=${current_orport:-$OR_PORT}
+        restart_and_verify_tor
+        ;;
+      3)
+        if command_exists journalctl; then
+          journalctl -u "$TOR_SERVICE" -n 80 --no-pager || true
+        else
+          warn "journalctl is not available."
+        fi
+        ;;
+      4)
+        check_tor_orport_self_test "1 hour ago"
+        ;;
+      5|"")
+        return 0
+        ;;
+      *)
+        warn "Choose 1, 2, 3, 4, or 5."
+        ;;
+    esac
+  done
+}
+
+existing_relay_menu() {
+  local choice
+
+  existing_tor_relay_detected || return 1
+
+  while true; do
+    section "Existing Relay Tools"
+    info "An existing Tor relay configuration or active Tor service was detected."
+    step_prefix
+    printf '%s\n' "  1) Manage MyFamily"
+    step_prefix
+    printf '%s\n' "  2) Run relay health check"
+    step_prefix
+    printf '%s\n' "  3) Repair tools"
+    step_prefix
+    printf '%s\n' "  4) Run full guided setup again"
+    step_prefix
+    printf '%s\n' "  5) Exit"
+
+    choice=$(prompt_line "Choose an action" "1")
+    case "$choice" in
+      1)
+        manage_myfamily
+        return 0
+        ;;
+      2)
+        run_relay_health_check
+        return 0
+        ;;
+      3)
+        repair_menu
+        ;;
+      4)
+        return 1
+        ;;
+      5|"")
+        exit 0
+        ;;
+      *)
+        warn "Choose 1, 2, 3, 4, or 5."
+        ;;
+    esac
+  done
+}
+
 show_summary() {
   local torrc_preview="$TMP_DIR/torrc.preview"
   build_torrc "$torrc_preview"
@@ -1776,6 +2338,9 @@ main() {
 
   banner
   require_supported_system
+  if existing_relay_menu; then
+    exit 0
+  fi
   collect_system_hostname
   collect_relay_mode
   collect_relay_identity

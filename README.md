@@ -11,6 +11,8 @@ This repo is a small, opinionated Bash installer for turning a fresh Debian or U
 
 The terminal flow uses numbered timeline-style steps, so you always know where you are in the setup.
 
+If the script detects an existing relay, it opens an operator tools menu instead of forcing you through the full setup again. From there you can manage `MyFamily`, run health checks, or use basic repair actions.
+
 ## Status
 
 This is experimental software, but it works pretty well in real VPS testing so far. Treat it like a sharp tool: read it, run `--dry-run`, and only then let it touch a server.
@@ -98,6 +100,7 @@ The installer walks through the choices that actually matter:
 - Exit relay options when exit mode is selected: provider readiness, reduced or default exit policy, optional IPv6 exiting, and local Unbound DNS setup
 - Bandwidth mode: steady monthly traffic budget, manual `RelayBandwidthRate` / `RelayBandwidthBurst`, hard monthly `AccountingMax`, or no relay-specific cap
 - Maximum monthly traffic such as `10TB`, provider quota style, and safety headroom when using the steady budget mode
+- Existing relay tools: MyFamily management, health checks, and repair actions without redoing the full installer
 - Automatic package updates
 - Optional Nyx install for terminal relay monitoring
 - Firewall rule management when a supported firewall is detected
@@ -122,6 +125,7 @@ When confirmed, the script:
 - Optionally writes `IPv6Exit 1` when exit mode and IPv6 ORPort are both selected.
 - Optionally installs and starts `unbound` for exit relay DNS, backs up `/etc/resolv.conf`, and points the system resolver at `127.0.0.1`.
 - Optionally calculates steady bandwidth limits from a monthly traffic budget, including `RelayBandwidthRate`, `RelayBandwidthBurst`, `AccountingRule`, and `AccountingMax`.
+- When run on an existing relay, can resolve MyFamily members through Tor Metrics Onionoo by nickname or full fingerprint, then back up and update the `MyFamily` line in `/etc/tor/torrc`.
 - Optionally installs and configures `unattended-upgrades` for security and Tor updates.
 - Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
 - Enables and restarts `tor@default`.
@@ -176,12 +180,29 @@ Sandbox 1
 
 That example is the shape produced by steady budget mode for a `10TB` monthly provider quota counted as combined inbound + outbound traffic with 10% headroom. The exact numbers change with your provider quota style and chosen safety margin.
 
+## Existing Relay Tools
+
+When an active Tor service or relay `ORPort` is detected, the script offers:
+
+- Manage `MyFamily`
+- Run a relay health check
+- Repair tools
+- Run the full guided setup again
+- Exit
+
+The MyFamily manager accepts a relay nickname or a full 40-character fingerprint. Nicknames are not unique, so nickname lookup uses Tor Metrics Onionoo, shows candidates with fingerprints and running status, and asks you to choose the exact relay number before writing anything.
+
+The script stores `MyFamily` as fingerprints, not nicknames. It backs up `/etc/tor/torrc`, keeps a single managed `MyFamily` line, verifies the Tor config, and offers to restart `tor@default`.
+
+Best practice: apply the same `MyFamily` value on every relay you control. Onionoo and Relay Search may need time to show the new family relationship after the relays publish updated descriptors.
+
 ## Security Notes
 
 - Always review privileged scripts before running them on a server.
 - `ContactInfo` is public. Use an address or contact string you are comfortable publishing.
 - The steady bandwidth calculator is designed to keep the relay useful throughout the month instead of racing into `AccountingMax` hibernation. It uses a safety headroom because Tor's accounting uses powers of two and does not count every byte a VPS provider may bill.
 - Provider traffic accounting differs. If you are unsure whether your provider counts inbound + outbound or outbound only, choose the combined inbound + outbound option.
+- Use `MyFamily` for every relay controlled by the same operator. The installer resolves nicknames to fingerprints because nicknames can collide.
 - Guard/middle mode writes `ExitRelay 0`; exit mode writes `ExitRelay 1` and the exit policy you selected.
 - Exit relays need more operational care than Guard/middle relays. Use a provider that allows exit traffic, plan abuse handling, and consider reverse DNS / WHOIS notes that clearly identify the server as a Tor exit.
 - For exit mode, the script can install Unbound and switch `/etc/resolv.conf` to `nameserver 127.0.0.1`, matching Tor's Debian/Ubuntu exit relay DNS guidance. It backs up the old resolver config first.
@@ -242,6 +263,12 @@ Open Nyx if you installed it:
 
 ```bash
 sudo -u debian-tor nyx
+```
+
+Run the script again for existing relay tools:
+
+```bash
+sudo ./setup-tor-guard-relay.sh
 ```
 
 Check Unbound on an exit relay:
@@ -345,9 +372,11 @@ This script was built from current official Tor documentation, including:
 - [Debian/Ubuntu exit relay DNS setup](https://community.torproject.org/relay/setup/exit/debian-ubuntu/)
 - [Tor Debian/Ubuntu package installation](https://support.torproject.org/little-t-tor/getting-started/installing/)
 - [Relay post-install and good practices](https://community.torproject.org/relay/setup/post-install/)
+- [Running multiple relays / MyFamily](https://support.torproject.org/relays/getting-started/my-family/)
 - [Relay requirements](https://community.torproject.org/relay/relays-requirements/)
 - [Technical considerations](https://community.torproject.org/relay/technical-considerations/)
 - [Bandwidth limits](https://support.torproject.org/relays/performance/bandwidth-limits/)
+- [Tor Metrics Onionoo protocol](https://metrics.torproject.org/onionoo.html)
 - [Expectations for relay operators](https://community.torproject.org/policies/relays/expectations-for-relay-operators/)
 - [Lifecycle of a new relay](https://blog.torproject.org/lifecycle-of-a-new-relay/)
 

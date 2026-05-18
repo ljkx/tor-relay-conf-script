@@ -7,8 +7,9 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.4.1"
+VERSION="1.5.0"
 DRY_RUN=0
+DECOMMISSION_MODE=0
 USE_FZF=0
 PLAIN_TUI=0
 
@@ -75,6 +76,8 @@ AUTO_UPGRADES_PATH="/etc/apt/apt.conf.d/20auto-upgrades"
 TOR_SERVICE="tor@default"
 RESOLV_CONF_PATH="/etc/resolv.conf"
 ONIONOO_BASE_URL="https://onionoo.torproject.org"
+STATE_DIR="/var/lib/tor-relay-setup"
+STATE_FILE="${STATE_DIR}/install-state"
 
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   BOLD=$'\033[1m'
@@ -135,12 +138,15 @@ Interactively configure a Tor relay on a fresh Debian or Ubuntu VPS.
 Usage:
   ./${SCRIPT_NAME}
   ./${SCRIPT_NAME} --dry-run
+  ./${SCRIPT_NAME} --uninstall
   ./${SCRIPT_NAME} --plain
   ./${SCRIPT_NAME} --help
 
 Options:
   --dry-run   Prompt normally and print the system changes that would be made,
               without installing packages or writing system files.
+  --uninstall Remove traces of this installer/tool only. It does not remove
+              Tor, torrc, relay keys, firewall rules, logs, or relay state.
   --plain     Use the built-in line interface instead of the fzf selectors.
   --help      Show this help text and exit.
   --version   Show the script version and exit.
@@ -150,8 +156,9 @@ Supported targets:
   official Tor Project apt repository.
 
 This script can configure either a Guard/middle relay or an exit relay.
-If an existing relay is detected, it opens tools for MyFamily management,
-health checks, repair actions, or rerunning the full guided setup.
+If an existing relay is detected, it opens the relay operator console:
+MyFamily, health checks, directory status, service controls, logs,
+safe config edits, backups, package tools, repair, and script cleanup.
 EOF
 }
 
@@ -160,6 +167,9 @@ parse_args() {
     case "$1" in
       --dry-run)
         DRY_RUN=1
+        ;;
+      --uninstall|--decommission)
+        DECOMMISSION_MODE=1
         ;;
       --plain|--no-tui)
         PLAIN_TUI=1
@@ -260,6 +270,11 @@ bootstrap_tui() {
     return 0
   fi
 
+  if ! ask_yes_no "Install fzf now for searchable selector menus?" "yes"; then
+    warn "Using the built-in line interface. You can install fzf later from Packages and Tools."
+    return 0
+  fi
+
   command_exists df && {
     check_path_capacity /var/lib/apt/lists 512000 2048
     check_path_capacity /var/cache/apt/archives 512000 2048
@@ -271,6 +286,7 @@ bootstrap_tui() {
     && env DEBIAN_FRONTEND=noninteractive apt-get install -y fzf \
     && command_exists fzf; then
     USE_FZF=1
+    mark_script_installed_fzf
     success "Polished selector mode enabled with fzf."
   else
     warn "Could not install fzf. Falling back to the built-in line interface."
@@ -507,16 +523,23 @@ choose_with_fzf() {
     --height=80%
     --reverse
     --border
+    --margin=1,2
     --delimiter=$'\t'
     --with-nth=1,2
     --prompt="$prompt_label"
+    --pointer=">"
+    --marker="*"
+    --color="fg:252,bg:232,hl:81,fg+:255,bg+:24,hl+:51,prompt:43,pointer:43,marker:154,info:141,border:66,header:110"
     --preview='printf "%s\n\n%s\n\n%s\n" {2} {3} {4}'
     --preview-window=down:6:wrap
   )
 
   case "$mode" in
     multi)
-      args+=(--multi --bind=space:toggle,d:accept --header="Space toggles. Press d or Enter to accept; Esc cancels.")
+      args+=(--multi --bind=space:toggle --header="Space toggles rows. Enter accepts; Esc cancels.")
+      ;;
+    delete)
+      args+=(--multi --bind=space:toggle,d:accept --header="Space marks rows. Press d or Enter to continue to delete confirmation; Esc cancels.")
       ;;
     single)
       args+=(--header="Type to filter. Enter selects; Esc cancels.")
@@ -547,6 +570,7 @@ choose_menu() {
   local label
   local description
   local i
+  local pass
 
   if tui_available; then
     local list_file
@@ -554,17 +578,26 @@ choose_menu() {
     list_file=$(mktemp_in_workspace)
     output_file=$(mktemp_in_workspace)
 
-    for ((i = 0; i < ${#options[@]}; i += 3)); do
-      key=${options[i]}
-      label=${options[i + 1]}
-      description=${options[i + 2]}
-      printf '%s\t%s\t%s\t%s\n' "$key" "$label" "${description:-}" "Current default: ${default_choice}" >> "$list_file"
-      if [[ "$key" =~ ^[[:alnum:]]$ ]]; then
-        if [[ -n "$expect_keys" ]]; then
-          expect_keys+=","
+    for pass in default rest; do
+      for ((i = 0; i < ${#options[@]}; i += 3)); do
+        key=${options[i]}
+        [[ "$pass" == "default" && "$key" != "$default_choice" ]] && continue
+        [[ "$pass" == "rest" && "$key" == "$default_choice" ]] && continue
+
+        label=${options[i + 1]}
+        description=${options[i + 2]}
+        if [[ "$key" == "$default_choice" ]]; then
+          printf '%s\t%s\t%s\t%s\n' "$key" "$label" "${description:-}" "Default if you press Enter" >> "$list_file"
+        else
+          printf '%s\t%s\t%s\t%s\n' "$key" "$label" "${description:-}" "" >> "$list_file"
         fi
-        expect_keys+="$key"
-      fi
+        if [[ "$key" =~ ^[[:alnum:]]$ ]]; then
+          if [[ -n "$expect_keys" ]]; then
+            expect_keys+=","
+          fi
+          expect_keys+="$key"
+        fi
+      done
     done
 
     if ! choose_with_fzf "$output_file" "$title" single "$list_file" "$expect_keys"; then
@@ -621,6 +654,11 @@ choose_checklist() {
   local result_name=$1
   local title=$2
   shift 2
+  local fzf_mode="multi"
+  if [[ "${1:-}" == "--delete" ]]; then
+    fzf_mode="delete"
+    shift
+  fi
   local -n result_ref=$result_name
   local -a options=("$@")
   local key
@@ -646,7 +684,7 @@ choose_checklist() {
       printf '%s\t%s\t%s\t%s\n' "$key" "$label" "$description" "$status" >> "$list_file"
     done
 
-    if ! choose_with_fzf "$output_file" "$title" multi "$list_file"; then
+    if ! choose_with_fzf "$output_file" "$title" "$fzf_mode" "$list_file"; then
       rm -f -- "$list_file" "$output_file"
       return 1
     fi
@@ -674,7 +712,7 @@ choose_checklist() {
     printf '\n' >&2
   done
 
-  line=$(prompt_line "Choose one or more numbers separated by spaces (blank to cancel)")
+  line=$(prompt_line "Choose one or more entries separated by spaces or commas (blank to cancel)")
   [[ -n "$line" ]] || return 1
   line=${line//,/ }
   # shellcheck disable=SC2206
@@ -1882,17 +1920,12 @@ select_relay_fingerprint() {
     selections=("$selection_hint")
   elif tui_available; then
     local -a candidate_options=()
-    local default_status
     while IFS=$'\t' read -r index fingerprint nickname running addresses; do
-      default_status="OFF"
-      if ((row_count == 1)); then
-        default_status="ON"
-      fi
       candidate_options+=(
         "$index"
         "$fingerprint"
         "nickname:${nickname}  running:${running}  ${addresses:-no addresses shown}"
-        "$default_status"
+        "candidate"
       )
     done < "$candidates_file"
     if ! choose_checklist selections "Select relay fingerprint(s) to add" "${candidate_options[@]}"; then
@@ -2095,7 +2128,7 @@ remove_myfamily_member() {
     fi
   done
 
-  if ! choose_checklist selections "MyFamily fingerprints: Space selects, d deletes" "${remove_options[@]}"; then
+  if ! choose_checklist selections "MyFamily fingerprints: Space selects, d deletes" --delete "${remove_options[@]}"; then
     warn "No fingerprints selected for deletion."
     return 0
   fi
@@ -2136,6 +2169,20 @@ remove_myfamily_member() {
   fi
 }
 
+format_myfamily_csv() {
+  local first=1
+  local fingerprint
+
+  for fingerprint in "$@"; do
+    if ((first)); then
+      first=0
+    else
+      printf ','
+    fi
+    printf '$%s' "$(normalize_fingerprint "$fingerprint")"
+  done
+}
+
 save_myfamily_changes() {
   local array_name=$1
   local -n family_array=$array_name
@@ -2156,7 +2203,7 @@ save_myfamily_changes() {
     fi
   fi
 
-  family_csv=$(IFS=,; printf '%s' "${family_array[*]}")
+  family_csv=$(format_myfamily_csv "${family_array[@]}")
   printf '\n'
   step_prefix
   printf '%s\n' "Proposed MyFamily line:"
@@ -2271,6 +2318,714 @@ show_myfamily_status() {
   info "Published family changes can take hours to show up in consensus and Relay Search."
 }
 
+ensure_timestamp() {
+  TIMESTAMP=${TIMESTAMP:-$(date -u '+%Y%m%dT%H%M%SZ')}
+}
+
+mark_script_installed_fzf() {
+  if ((DRY_RUN)); then
+    info "Would record that this script installed fzf."
+    return 0
+  fi
+
+  install -d -m 0700 "$STATE_DIR"
+  {
+    printf 'installed_fzf=1\n'
+    printf 'installed_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf 'script=%s\n' "$SCRIPT_NAME"
+  } > "$STATE_FILE"
+  chmod 0600 "$STATE_FILE"
+}
+
+script_installed_fzf() {
+  [[ -r "$STATE_FILE" ]] && grep -Fxq 'installed_fzf=1' "$STATE_FILE"
+}
+
+selection_contains() {
+  local needle=$1
+  shift
+  local item
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+strip_torrc_quotes() {
+  local value=$1
+  if [[ "$value" == \"*\" && "$value" == *\" ]]; then
+    value=${value#\"}
+    value=${value%\"}
+    value=${value//\\\"/\"}
+    value=${value//\\\\/\\}
+  fi
+  printf '%s' "$value"
+}
+
+read_torrc_directive() {
+  local directive=$1
+  torrc_exists || return 1
+  awk -v wanted="${directive,,}" '
+    /^[[:space:]]*#/ { next }
+    tolower($1) == wanted {
+      $1 = ""
+      sub(/^[[:space:]]+/, "")
+      print
+      exit
+    }
+  ' "$TORRC_PATH"
+}
+
+write_torrc_set_directive() {
+  local output=$1
+  local directive=$2
+  local directive_line=$3
+
+  torrc_exists || die "${TORRC_PATH} does not exist yet."
+  awk -v wanted="${directive,,}" -v replacement="$directive_line" '
+    BEGIN { replaced = 0 }
+    /^[[:space:]]*#/ { print; next }
+    tolower($1) == wanted {
+      if (!replaced) {
+        print replacement
+        replaced = 1
+      }
+      next
+    }
+    { print }
+    END {
+      if (!replaced) {
+        print replacement
+      }
+    }
+  ' "$TORRC_PATH" > "$output"
+}
+
+write_torrc_bandwidth() {
+  local output=$1
+
+  torrc_exists || die "${TORRC_PATH} does not exist yet."
+  awk '
+    /^[[:space:]]*#/ { print; next }
+    tolower($1) == "relaybandwidthrate" { next }
+    tolower($1) == "relaybandwidthburst" { next }
+    tolower($1) == "accountingstart" { next }
+    tolower($1) == "accountingrule" { next }
+    tolower($1) == "accountingmax" { next }
+    { print }
+  ' "$TORRC_PATH" > "$output"
+
+  {
+    printf '\n'
+    printf '# Managed bandwidth and traffic settings.\n'
+    if ((CONFIGURE_RELAY_BANDWIDTH)); then
+      printf 'RelayBandwidthRate %s %s\n' "$RELAY_BANDWIDTH_RATE_VALUE" "$RELAY_BANDWIDTH_RATE_UNIT"
+      printf 'RelayBandwidthBurst %s %s\n' "$RELAY_BANDWIDTH_BURST_VALUE" "$RELAY_BANDWIDTH_BURST_UNIT"
+    fi
+    if ((CONFIGURE_ACCOUNTING)); then
+      printf 'AccountingStart month 1 00:00\n'
+      if [[ "$ACCOUNTING_RULE" != "max" ]]; then
+        printf 'AccountingRule %s\n' "$ACCOUNTING_RULE"
+      fi
+      printf 'AccountingMax %s GBytes\n' "$ACCOUNTING_MAX_GBYTES"
+    fi
+  } >> "$output"
+}
+
+reload_or_restart_tor() {
+  if ((DRY_RUN)); then
+    info "Would reload ${TOR_SERVICE}, falling back to restart if reload is unavailable."
+    print_command systemctl reload "$TOR_SERVICE"
+    return 0
+  fi
+
+  if systemctl reload "$TOR_SERVICE" 2>/dev/null; then
+    success "Reloaded ${TOR_SERVICE}."
+  else
+    warn "Reload failed or is unsupported; restarting ${TOR_SERVICE} instead."
+    restart_and_verify_tor
+  fi
+}
+
+apply_existing_torrc_change() {
+  local candidate=$1
+  local description=$2
+
+  ensure_timestamp
+  install_file_if_changed "$candidate" "$TORRC_PATH" "0644"
+  verify_tor_config
+  if ask_yes_no "Reload Tor now to apply ${description}?" "yes"; then
+    reload_or_restart_tor
+  else
+    warn "Change is written but will not be active until Tor reloads or restarts."
+  fi
+}
+
+configure_common_torrc_menu() {
+  local choice
+  local current
+  local candidate
+
+  while true; do
+    section "Configuration Editor"
+    choose_menu choice "Common relay settings" "1" \
+      "1" "Relay nickname" "Change Nickname safely" \
+      "2" "ContactInfo" "Change public operator contact string" \
+      "3" "Bandwidth and traffic" "Recalculate relay bandwidth/accounting limits" \
+      "4" "Sandbox" "Toggle Tor syscall Sandbox option" \
+      "5" "Disable SOCKS listener" "Write SocksPort 0 for relay-only servers" \
+      "6" "Back" "Return to operator console"
+
+    case "$choice" in
+      1)
+        current=$(read_torrc_directive Nickname || true)
+        while true; do
+          current=$(prompt_line "Relay nickname" "${current:-RelayName}")
+          if valid_nickname "$current"; then
+            break
+          fi
+          warn "Use 1 to 19 characters, letters and numbers only."
+        done
+        candidate=$(mktemp_in_workspace)
+        write_torrc_set_directive "$candidate" Nickname "Nickname ${current}"
+        apply_existing_torrc_change "$candidate" "nickname change"
+        ;;
+      2)
+        current=$(strip_torrc_quotes "$(read_torrc_directive ContactInfo || true)")
+        while true; do
+          current=$(prompt_line "ContactInfo email or contact string" "$current")
+          if valid_contact_info "$current"; then
+            break
+          fi
+          warn "ContactInfo must be non-empty, under 250 characters, and cannot contain '#'."
+        done
+        candidate=$(mktemp_in_workspace)
+        write_torrc_set_directive "$candidate" ContactInfo "ContactInfo $(torrc_quote "$current")"
+        apply_existing_torrc_change "$candidate" "ContactInfo change"
+        ;;
+      3)
+        collect_bandwidth
+        candidate=$(mktemp_in_workspace)
+        write_torrc_bandwidth "$candidate"
+        apply_existing_torrc_change "$candidate" "bandwidth change"
+        ;;
+      4)
+        if ask_yes_no "Enable Tor Sandbox 1?" "yes"; then
+          current="Sandbox 1"
+        else
+          current="Sandbox 0"
+        fi
+        candidate=$(mktemp_in_workspace)
+        write_torrc_set_directive "$candidate" Sandbox "$current"
+        apply_existing_torrc_change "$candidate" "Sandbox change"
+        ;;
+      5)
+        candidate=$(mktemp_in_workspace)
+        write_torrc_set_directive "$candidate" SocksPort "SocksPort 0"
+        apply_existing_torrc_change "$candidate" "SOCKS listener change"
+        ;;
+      6|"")
+        return 0
+        ;;
+    esac
+  done
+}
+
+show_relay_directory_status() {
+  local local_fp
+  local json_file="$TMP_DIR/onionoo-details.json"
+  local python_bin
+
+  section "Relay Directory Status"
+
+  if ! local_fp=$(local_relay_fingerprint); then
+    warn "Local relay fingerprint is not readable yet. Start Tor once, then retry."
+    return 0
+  fi
+  local_fp=$(normalize_fingerprint "$local_fp")
+  success "Local relay fingerprint: ${local_fp}"
+  printf 'Relay Search: https://metrics.torproject.org/rs.html#details/%s\n' "$local_fp"
+
+  python_bin=$(python_command) || {
+    warn "python3/python is unavailable; cannot parse Onionoo details."
+    return 0
+  }
+
+  fetch_url_to_file "${ONIONOO_BASE_URL}/details?lookup=${local_fp}" "$json_file" || {
+    warn "Could not fetch Tor Metrics Onionoo details."
+    return 0
+  }
+
+  "$python_bin" - "$json_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    document = json.load(handle)
+
+relays = document.get("relays", [])
+if not relays:
+    print("Onionoo has not published this relay yet. New relays can take about 3 hours to appear.")
+    raise SystemExit
+
+relay = relays[0]
+fields = [
+    ("Nickname", relay.get("nickname", "")),
+    ("Running", "yes" if relay.get("running") else "no"),
+    ("Flags", ", ".join(relay.get("flags", []))),
+    ("First seen", relay.get("first_seen", "")),
+    ("Last seen", relay.get("last_seen", "")),
+    ("Advertised bandwidth", relay.get("advertised_bandwidth", "")),
+    ("Observed bandwidth", relay.get("observed_bandwidth", "")),
+    ("Consensus weight", relay.get("consensus_weight", "")),
+    ("Platform", relay.get("platform", "")),
+    ("Contact", relay.get("contact", "")),
+]
+for key, value in fields:
+    if value != "":
+        print(f"{key}: {value}")
+
+addresses = relay.get("or_addresses", [])
+if addresses:
+    print("OR addresses:")
+    for address in addresses:
+        print(f"  {address}")
+PY
+}
+
+service_control_menu() {
+  local choice
+
+  while true; do
+    section "Service Controls"
+    choose_menu choice "Manage ${TOR_SERVICE}" "1" \
+      "1" "Status" "Show systemd service status" \
+      "2" "Start" "Start and enable Tor" \
+      "3" "Reload" "Reload torrc without a full restart when possible" \
+      "4" "Restart" "Restart and verify Tor" \
+      "5" "Stop" "Stop Tor after confirmation" \
+      "6" "Disable" "Disable Tor autostart after confirmation" \
+      "7" "Back" "Return to operator console"
+
+    case "$choice" in
+      1)
+        if command_exists systemctl; then
+          systemctl status "$TOR_SERVICE" --no-pager || true
+        else
+          warn "systemctl is unavailable."
+        fi
+        ;;
+      2)
+        run "Enabling ${TOR_SERVICE}" systemctl enable "$TOR_SERVICE"
+        run "Starting ${TOR_SERVICE}" systemctl start "$TOR_SERVICE"
+        ;;
+      3)
+        verify_tor_config
+        reload_or_restart_tor
+        ;;
+      4)
+        restart_and_verify_tor
+        ;;
+      5)
+        if ask_yes_no "Stop Tor now? This relay will go offline." "no"; then
+          run "Stopping ${TOR_SERVICE}" systemctl stop "$TOR_SERVICE"
+        fi
+        ;;
+      6)
+        if ask_yes_no "Disable Tor autostart? The relay will not start after reboot." "no"; then
+          run "Disabling ${TOR_SERVICE}" systemctl disable "$TOR_SERVICE"
+        fi
+        ;;
+      7|"")
+        return 0
+        ;;
+    esac
+  done
+}
+
+logs_menu() {
+  local choice
+
+  while true; do
+    section "Logs and Signals"
+    choose_menu choice "Tor logs" "1" \
+      "1" "Recent Tor logs" "Show last 120 journal lines" \
+      "2" "Follow Tor logs" "Live journalctl follow until Ctrl+C" \
+      "3" "ORPort self-test" "Look for Tor reachability messages" \
+      "4" "Back" "Return to operator console"
+
+    case "$choice" in
+      1)
+        if command_exists journalctl; then
+          journalctl -u "$TOR_SERVICE" -n 120 --no-pager || true
+        else
+          warn "journalctl is unavailable."
+        fi
+        ;;
+      2)
+        if command_exists journalctl; then
+          info "Press Ctrl+C to stop following logs."
+          journalctl -u "$TOR_SERVICE" -f || true
+        else
+          warn "journalctl is unavailable."
+        fi
+        ;;
+      3)
+        check_tor_orport_self_test "1 hour ago" 0
+        ;;
+      4|"")
+        return 0
+        ;;
+    esac
+  done
+}
+
+collect_torrc_backups() {
+  local -n output_ref=$1
+  local backup
+  output_ref=()
+
+  for backup in "${TORRC_PATH}".bak.*; do
+    [[ -e "$backup" ]] || continue
+    output_ref+=("$backup")
+  done
+}
+
+choose_torrc_backup() {
+  local result_name=$1
+  local -n result_ref=$result_name
+  local -a backups=()
+  local -a options=()
+  local choice
+  local index
+
+  result_ref=""
+  collect_torrc_backups backups
+  ((${#backups[@]})) || {
+    warn "No ${TORRC_PATH}.bak.* backups were found."
+    return 1
+  }
+
+  for ((index = 0; index < ${#backups[@]}; index++)); do
+    options+=("$((index + 1))" "${backups[$index]}" "restore this torrc backup")
+  done
+
+  choose_menu choice "Choose a torrc backup" "1" "${options[@]}"
+  [[ -n "$choice" ]] || return 1
+  result_ref=${backups[$((10#$choice - 1))]}
+}
+
+backup_identity_keys() {
+  local data_dir
+  local keys_dir
+  local archive
+
+  section "Identity Key Backup"
+  data_dir=$(tor_datadirectory)
+  keys_dir="${data_dir%/}/keys"
+  [[ -d "$keys_dir" ]] || die "Tor keys directory not found: ${keys_dir}"
+
+  warn "Relay identity keys are sensitive. Store the archive somewhere secure and private."
+  if ! ask_yes_no "Create a root-only archive of ${keys_dir}?" "yes"; then
+    return 0
+  fi
+
+  ensure_timestamp
+  archive="/root/tor-relay-identity-keys.${TIMESTAMP}.tar.gz"
+  if ((DRY_RUN)); then
+    info "Would create ${archive}"
+    print_command tar -C "$data_dir" -czf "$archive" keys
+    print_command chmod 600 "$archive"
+  else
+    tar -C "$data_dir" -czf "$archive" keys
+    chmod 600 "$archive"
+    success "Created ${archive}"
+  fi
+}
+
+backups_menu() {
+  local choice
+  local backup
+
+  while true; do
+    section "Backups"
+    choose_menu choice "Backup and restore" "1" \
+      "1" "Back up torrc" "Create a timestamped ${TORRC_PATH} backup" \
+      "2" "Back up identity keys" "Create a sensitive root-only archive" \
+      "3" "List backups" "Show torrc and identity-key archives" \
+      "4" "Restore torrc backup" "Restore a selected torrc backup and verify" \
+      "5" "Back" "Return to operator console"
+
+    case "$choice" in
+      1)
+        ensure_timestamp
+        backup_file "$TORRC_PATH"
+        ;;
+      2)
+        backup_identity_keys
+        ;;
+      3)
+        section "Available Backups"
+        printf '%s\n' "torrc backups:"
+        for backup in "${TORRC_PATH}".bak.*; do
+          [[ -e "$backup" ]] || continue
+          printf '  %s\n' "$backup"
+        done
+        printf '%s\n' "identity key archives:"
+        for backup in /root/tor-relay-identity-keys.*.tar.gz; do
+          [[ -e "$backup" ]] || continue
+          printf '  %s\n' "$backup"
+        done
+        ;;
+      4)
+        if choose_torrc_backup backup; then
+          if ask_yes_no "Restore ${backup} to ${TORRC_PATH}?" "no"; then
+            ensure_timestamp
+            install_file_if_changed "$backup" "$TORRC_PATH" "0644"
+            verify_tor_config
+            if ask_yes_no "Reload Tor after restoring torrc?" "yes"; then
+              reload_or_restart_tor
+            fi
+          fi
+        fi
+        ;;
+      5|"")
+        return 0
+        ;;
+    esac
+  done
+}
+
+package_tools_menu() {
+  local choice
+
+  while true; do
+    section "Packages and Tools"
+    choose_menu choice "Package maintenance" "1" \
+      "1" "Update Tor" "Refresh apt and upgrade Tor packages" \
+      "2" "Repair Tor apt repo" "Reinstall prerequisites, keyring file, and source" \
+      "3" "Configure automatic updates" "Install unattended-upgrades config" \
+      "4" "Install Nyx" "Terminal relay monitor" \
+      "5" "Install fzf" "Searchable selector dependency" \
+      "6" "Back" "Return to operator console"
+
+    case "$choice" in
+      1)
+        check_apt_capacity
+        install_tor_package
+        ;;
+      2)
+        check_apt_capacity
+        install_repository_prerequisites
+        configure_tor_repository
+        ;;
+      3)
+        check_apt_capacity
+        configure_unattended_upgrades
+        ;;
+      4)
+        check_apt_capacity
+        INSTALL_NYX=1
+        install_nyx_package
+        ;;
+      5)
+        check_apt_capacity
+        run "Installing fzf" env DEBIAN_FRONTEND=noninteractive apt-get install -y fzf
+        mark_script_installed_fzf
+        ;;
+      6|"")
+        return 0
+        ;;
+    esac
+  done
+}
+
+script_realpath() {
+  local source_path=${BASH_SOURCE[0]:-$0}
+  case "$source_path" in
+    bash|sh|dash|bash.exe|sh.exe|dash.exe|-bash|-sh)
+      return 1
+      ;;
+  esac
+
+  [[ -e "$source_path" ]] || return 1
+  if command_exists readlink; then
+    readlink -f "$source_path" 2>/dev/null && return 0
+  fi
+
+  (cd "$(dirname "$source_path")" && printf '%s/%s\n' "$(pwd -P)" "$(basename "$source_path")")
+}
+
+script_repo_root() {
+  local path=$1
+  local dir
+  dir=$(dirname "$path")
+  command_exists git || return 1
+  git -C "$dir" rev-parse --show-toplevel 2>/dev/null
+}
+
+repo_looks_like_this_project() {
+  local repo_root=$1
+  [[ -d "$repo_root/.git" ]] || return 1
+  git -C "$repo_root" remote -v 2>/dev/null | grep -Eq 'github\.com[:/]ljkx/tor-relay-setup(\.git)?'
+}
+
+safe_remove_script_path() {
+  local target=$1
+  [[ -n "$target" && -e "$target" ]] || return 0
+  case "$target" in
+    /|/root|/home|/etc|/usr|/var|/tmp)
+      die "Refusing to remove unsafe path: ${target}"
+      ;;
+  esac
+
+  if ((DRY_RUN)); then
+    info "Would remove ${target}"
+    print_command rm -rf -- "$target"
+  else
+    rm -rf -- "$target"
+    success "Removed ${target}"
+  fi
+}
+
+remove_tmp_operator_reports() {
+  local report
+  for report in /tmp/tor-relay-report.*.txt; do
+    [[ -e "$report" ]] || continue
+    if ((DRY_RUN)); then
+      info "Would remove ${report}"
+    else
+      rm -f -- "$report"
+      success "Removed ${report}"
+    fi
+  done
+}
+
+cleanup_script_traces() {
+  local script_path=""
+  local repo_root=""
+  local choice
+  local -a cleanup_options=()
+  local -a selections=()
+  local token
+
+  section "Clean Script Traces"
+  warn "This removes traces of this installer/tool only. It will not remove Tor, torrc, relay keys, logs, firewall rules, or the running relay."
+
+  script_path=$(script_realpath || true)
+  if [[ -n "$script_path" ]]; then
+    repo_root=$(script_repo_root "$script_path" || true)
+  fi
+
+  cleanup_options+=("state" "$STATE_DIR" "script state/manifest only" "safe")
+  cleanup_options+=("reports" "/tmp/tor-relay-report.*.txt" "operator reports created by this tool" "safe")
+
+  if script_installed_fzf; then
+    cleanup_options+=("fzf" "fzf package" "optional removal because this script recorded installing it" "optional")
+  fi
+
+  if [[ -n "$repo_root" ]] && repo_looks_like_this_project "$repo_root"; then
+    cleanup_options+=("repo" "$repo_root" "delete this cloned tor-relay-setup checkout" "destructive")
+  elif [[ -n "$script_path" ]]; then
+    cleanup_options+=("script" "$script_path" "delete this downloaded script file" "destructive")
+  else
+    warn "Could not identify a standalone script path. If you used curl | bash, there is no downloaded script file to remove."
+  fi
+
+  if ! choose_checklist selections "Select script traces to remove" --delete "${cleanup_options[@]}"; then
+    warn "No script traces selected for cleanup."
+    return 0
+  fi
+
+  printf '\n%s\n' "Selected cleanup actions:"
+  for choice in "${selections[@]}"; do
+    case "$choice" in
+      state) printf '  - Remove %s\n' "$STATE_DIR" ;;
+      reports) printf '  - Remove /tmp/tor-relay-report.*.txt\n' ;;
+      fzf) printf '  - Purge fzf package if apt installed it\n' ;;
+      repo) printf '  - Delete repo checkout: %s\n' "$repo_root" ;;
+      script) printf '  - Delete script file: %s\n' "$script_path" ;;
+    esac
+  done
+
+  warn "Tor itself is intentionally out of scope for this cleanup."
+  if ! ask_yes_no "Apply selected script-trace cleanup actions?" "no"; then
+    warn "Cleanup cancelled."
+    return 0
+  fi
+
+  if selection_contains repo "${selections[@]}" || selection_contains script "${selections[@]}"; then
+    token=$(prompt_line "Type DELETE SCRIPT TRACES to confirm removing script files")
+    if [[ "$token" != "DELETE SCRIPT TRACES" ]]; then
+      warn "Script file/repo deletion skipped."
+      selections=("${selections[@]/repo/}")
+      selections=("${selections[@]/script/}")
+    fi
+  fi
+
+  if selection_contains reports "${selections[@]}"; then
+    remove_tmp_operator_reports
+  fi
+
+  if selection_contains fzf "${selections[@]}"; then
+    if ask_yes_no "Purge fzf now? Skip this if you use fzf for anything else." "no"; then
+      run "Purging fzf" env DEBIAN_FRONTEND=noninteractive apt-get purge -y fzf
+    fi
+  fi
+
+  if selection_contains state "${selections[@]}"; then
+    safe_remove_script_path "$STATE_DIR"
+  fi
+
+  if selection_contains script "${selections[@]}"; then
+    safe_remove_script_path "$script_path"
+  fi
+
+  if selection_contains repo "${selections[@]}"; then
+    safe_remove_script_path "$repo_root"
+  fi
+
+  success "Script-trace cleanup finished. Tor relay state was left untouched."
+}
+
+operator_report() {
+  local report="/tmp/tor-relay-report.$(date -u '+%Y%m%dT%H%M%SZ').txt"
+  local local_fp=""
+  local current_orport=""
+
+  section "Operator Report"
+  local_fp=$(local_relay_fingerprint || true)
+  current_orport=$(read_torrc_first_orport || true)
+
+  {
+    printf 'Tor Relay Operator Report\n'
+    printf 'Generated: %s UTC\n\n' "$(date -u '+%Y-%m-%d %H:%M:%S')"
+    printf 'System: %s (%s, %s)\n' "$OS_PRETTY_NAME" "$OS_CODENAME" "$ARCHITECTURE"
+    printf 'Service: %s\n' "$TOR_SERVICE"
+    printf 'Fingerprint: %s\n' "${local_fp:-unavailable}"
+    printf 'ORPort: %s\n' "${current_orport:-unavailable}"
+    printf '\nTor version:\n'
+    tor --version 2>/dev/null || true
+    printf '\nService status:\n'
+    systemctl is-active "$TOR_SERVICE" 2>/dev/null || true
+    printf '\nConfigured relay directives:\n'
+    if torrc_exists; then
+      awk '
+        /^[[:space:]]*#/ { next }
+        /^[[:space:]]*$/ { next }
+        $1 ~ /^(Nickname|ContactInfo|ORPort|ExitRelay|ReducedExitPolicy|IPv6Exit|SocksPort|RelayBandwidthRate|RelayBandwidthBurst|AccountingMax|AccountingRule|MyFamily|SafeLogging|Sandbox)$/ {
+          print
+        }
+      ' "$TORRC_PATH"
+    fi
+    printf '\nRecent Tor warnings/errors:\n'
+    journalctl -u "$TOR_SERVICE" -n 120 --no-pager 2>/dev/null | grep -Ei 'warn|error|failed|reachable' || true
+  } > "$report"
+
+  success "Wrote ${report}"
+  warn "Review before sharing; ContactInfo and relay fingerprint are public, but logs can still contain local operational context."
+}
+
 run_relay_health_check() {
   local current_orport
   local local_fp
@@ -2316,7 +3071,7 @@ run_relay_health_check() {
     warn "No ORPort was found in ${TORRC_PATH}."
   fi
 
-  check_tor_orport_self_test "1 hour ago"
+  check_tor_orport_self_test "1 hour ago" 0
   show_myfamily_status
 }
 
@@ -2353,7 +3108,7 @@ repair_menu() {
         fi
         ;;
       4)
-        check_tor_orport_self_test "1 hour ago"
+        check_tor_orport_self_test "1 hour ago" 0
         ;;
       5)
         current_orport=$(read_torrc_first_orport || true)
@@ -2376,31 +3131,61 @@ existing_relay_menu() {
   existing_tor_relay_detected || return 1
 
   while true; do
-    section "Existing Relay Tools"
+    section "Relay Operator Console"
     info "An existing Tor relay configuration or active Tor service was detected."
     choose_menu choice "What would you like to do?" "1" \
       "1" "Manage MyFamily" "Add, remove, verify, and save family fingerprints" \
       "2" "Run relay health check" "Service, config, ORPort, logs, MyFamily" \
-      "3" "Repair tools" "Config, restart, logs, firewall" \
-      "4" "Run full guided setup again" "Reconfigure this relay" \
-      "5" "Exit" "Make no changes"
+      "3" "Directory status" "Fetch published relay status from Tor Metrics" \
+      "4" "Service controls" "Start, reload, restart, stop, enable, disable" \
+      "5" "Logs and signals" "Recent logs, follow logs, ORPort self-test" \
+      "6" "Configuration editor" "Common safe torrc changes" \
+      "7" "Backups" "torrc and identity-key backup/restore tools" \
+      "8" "Packages and tools" "Tor repo, updates, Nyx, fzf" \
+      "9" "Repair tools" "Config, restart, logs, firewall" \
+      "o" "Operator report" "Write a local troubleshooting report under /tmp" \
+      "c" "Clean script traces" "Remove this installer/repo traces, not Tor" \
+      "r" "Run full guided setup again" "Reconfigure this relay" \
+      "x" "Exit" "Make no changes"
 
     case "$choice" in
       1)
         manage_myfamily
-        return 0
         ;;
       2)
         run_relay_health_check
-        return 0
         ;;
       3)
-        repair_menu
+        show_relay_directory_status
         ;;
       4)
+        service_control_menu
+        ;;
+      5)
+        logs_menu
+        ;;
+      6)
+        configure_common_torrc_menu
+        ;;
+      7)
+        backups_menu
+        ;;
+      8)
+        package_tools_menu
+        ;;
+      9)
+        repair_menu
+        ;;
+      o)
+        operator_report
+        ;;
+      c)
+        cleanup_script_traces
+        ;;
+      r)
         return 1
         ;;
-      5|"")
+      x|"")
         exit 0
         ;;
     esac
@@ -2718,18 +3503,24 @@ check_tor_orport_self_test() {
   local deadline
   local log_output
   local since_time
+  local wait_seconds
 
   since_time=${1:-"5 minutes ago"}
+  wait_seconds=${2:-90}
 
   command_exists journalctl || {
     warn "journalctl not found; skipped Tor ORPort self-test log check."
     return 0
   }
 
-  info "Checking Tor ORPort reachability self-test logs for up to 90 seconds."
-  deadline=$((SECONDS + 90))
+  if ((wait_seconds > 0)); then
+    info "Checking Tor ORPort reachability self-test logs for up to ${wait_seconds} seconds."
+  else
+    info "Checking recent Tor ORPort reachability self-test logs."
+  fi
+  deadline=$((SECONDS + wait_seconds))
 
-  while ((SECONDS < deadline)); do
+  while true; do
     log_output=$(journalctl -u "$TOR_SERVICE" --since "$since_time" --no-pager 2>/dev/null || true)
 
     if grep -Fq "Self-testing indicates your ORPort is reachable from the outside. Excellent." <<< "$log_output"; then
@@ -2743,11 +3534,16 @@ check_tor_orport_self_test() {
       return 0
     fi
 
+    ((wait_seconds > 0 && SECONDS < deadline)) || break
     sleep 5
   done
 
-  warn "Tor did not report ORPort self-test success within 90 seconds."
-  warn "This can take longer. Watch logs with: journalctl -u ${TOR_SERVICE} -f"
+  if ((wait_seconds > 0)); then
+    warn "Tor did not report ORPort self-test success within ${wait_seconds} seconds."
+    warn "This can take longer. Watch logs with: journalctl -u ${TOR_SERVICE} -f"
+  else
+    warn "No recent ORPort self-test result was found in the selected log window."
+  fi
 }
 
 restart_and_verify_tor() {
@@ -2852,6 +3648,13 @@ main() {
 
   banner
   require_supported_system
+  if ((DECOMMISSION_MODE)); then
+    if command_exists fzf; then
+      USE_FZF=1
+    fi
+    cleanup_script_traces
+    exit 0
+  fi
   bootstrap_tui
   if existing_relay_menu; then
     exit 0

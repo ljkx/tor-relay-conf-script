@@ -9,7 +9,7 @@
 
 This repo is a small, opinionated Bash installer for turning a fresh Debian or Ubuntu VPS into a public Tor relay. It can configure a Guard/middle relay or, when you intentionally choose it, an exit relay with the Tor Project's recommended exit basics. It is meant for the person who knows the practical details, like a relay nickname, contact address, bandwidth expectations, whether the server has IPv6, and whether this VPS is supposed to exit traffic, but does not want to hand-edit `torrc` at midnight.
 
-The installer uses `fzf` for the parts that benefit from a real selector: menus, MyFamily fingerprints, and nickname search results. It installs `fzf` automatically on real Debian/Ubuntu runs when it is missing. That small UI dependency may be installed before the relay configuration review; the actual Tor/firewall/relay changes are still shown before apply. Use `--plain` if you want the built-in line interface instead.
+The installer uses `fzf` for the parts that benefit from a real selector: menus, MyFamily fingerprints, and nickname search results. If `fzf` is missing, it asks before installing it; otherwise it falls back to the built-in line interface. Use `--plain` if you want the line interface from the start.
 
 If the script detects an existing relay, it opens an operator tools menu instead of forcing you through the full setup again. From there you can manage `MyFamily`, run health checks, or use basic repair actions.
 
@@ -75,6 +75,12 @@ Plain terminal mode:
 sudo ./setup-tor-guard-relay.sh --plain
 ```
 
+Remove traces of this tool, not Tor:
+
+```bash
+sudo ./setup-tor-guard-relay.sh --uninstall
+```
+
 ## Supported Systems
 
 The installer supports Debian and Ubuntu releases when the official Tor Project apt repository publishes packages for that release codename.
@@ -106,8 +112,8 @@ The installer walks through the choices that actually matter:
 - Exit relay options when exit mode is selected: provider readiness, reduced or default exit policy, optional IPv6 exiting, and local Unbound DNS setup
 - Bandwidth mode: steady monthly traffic budget, manual `RelayBandwidthRate` / `RelayBandwidthBurst`, hard monthly `AccountingMax`, or no relay-specific cap
 - Maximum monthly traffic such as `10TB`, provider quota style, and safety headroom when using the steady budget mode
-- Existing relay tools: MyFamily management, health checks, and repair actions without redoing the full installer
-- Selector dependency bootstrap: install `fzf` for searchable menus and MyFamily lists, or use `--plain`
+- Existing relay operator console: MyFamily, health checks, directory status, service controls, logs, configuration editor, backups, package tools, repair tools, and script-trace cleanup
+- Selector dependency bootstrap: optionally install `fzf` for searchable menus and MyFamily lists, or use `--plain`
 - Automatic package updates
 - Optional Nyx install for terminal relay monitoring
 - Firewall setup: use an existing firewall manager, or optionally install UFW, allow SSH first, allow the ORPort, and enable UFW
@@ -133,7 +139,8 @@ When confirmed, the script:
 - Optionally installs and starts `unbound` for exit relay DNS, backs up `/etc/resolv.conf`, and points the system resolver at `127.0.0.1`.
 - Optionally calculates steady bandwidth limits from a monthly traffic budget, including `RelayBandwidthRate`, `RelayBandwidthBurst`, `AccountingRule`, and `AccountingMax`.
 - When run on an existing relay, can resolve MyFamily members through Tor Metrics Onionoo by nickname or full fingerprint, then back up and update the `MyFamily` line in `/etc/tor/torrc`.
-- Installs `fzf` from apt when needed for searchable selectors, unless `--plain` or `--dry-run` is used.
+- Asks before installing `fzf` from apt for searchable selectors, unless `--plain` or `--dry-run` is used.
+- If this script installs `fzf`, records that fact under `/var/lib/tor-relay-setup` so script-trace cleanup can offer to remove it later.
 - Optionally installs and configures `unattended-upgrades` for security and Tor updates.
 - Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
 - If no supported local firewall manager is installed, can install UFW, add an SSH allow rule before anything else, add the ORPort allow rule, and then enable UFW.
@@ -195,7 +202,15 @@ When an active Tor service or relay `ORPort` is detected, the script offers:
 
 - Manage `MyFamily`
 - Run a relay health check
-- Repair tools
+- Check published Tor Metrics / Relay Search status
+- Manage `tor@default` service controls
+- View recent or live logs
+- Edit common safe relay settings
+- Create or restore backups
+- Maintain packages and helper tools
+- Repair config, service, logs, or firewall
+- Write a local operator report for troubleshooting
+- Clean traces of this installer script without touching Tor
 - Run the full guided setup again
 - Exit
 
@@ -337,41 +352,19 @@ apt-cache policy deb.torproject.org-keyring
 sudo systemctl restart tor@default
 ```
 
-## Uninstalling
+## Cleaning Up This Tool
 
-Stop and disable Tor:
-
-```bash
-sudo systemctl disable --now tor@default
-```
-
-Remove packages if you no longer want Tor installed:
+To remove traces of this installer itself without touching Tor, run:
 
 ```bash
-sudo apt remove tor
+sudo ./setup-tor-guard-relay.sh --uninstall
 ```
 
-If you installed Unbound only for exit relay DNS and no longer need it:
+That cleanup mode can remove the downloaded script or cloned repo checkout, the script's tiny state directory under `/var/lib/tor-relay-setup`, temporary operator reports, and optionally `fzf` if this script recorded installing it.
 
-```bash
-sudo chattr -i /etc/resolv.conf 2>/dev/null || true
-sudo systemctl disable --now unbound
-sudo apt remove unbound
-```
+It deliberately does **not** remove Tor, `/etc/tor/torrc`, `/var/lib/tor`, relay identity keys, firewall rules, logs, the Tor apt repository, or Unbound. Those are relay state, not script traces.
 
-Optional cleanup:
-
-```bash
-sudo rm /etc/apt/sources.list.d/tor.sources
-sudo rm /usr/share/keyrings/deb.torproject.org-keyring.gpg
-sudo apt update
-```
-
-Remove `/var/lib/tor` only if you intentionally want to delete relay identity keys and lose relay reputation:
-
-```bash
-sudo rm -rf /var/lib/tor
-```
+If you actually want to decommission a relay, review the commands yourself first. In particular, deleting `/var/lib/tor` destroys the relay identity keys and loses relay reputation.
 
 ## Official Tor Sources
 

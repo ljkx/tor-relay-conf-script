@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.2.1"
+VERSION="1.2.2"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -338,8 +338,8 @@ sanitize_reply() {
 
   value=${value//$'\e[200~'/}
   value=${value//$'\e[201~'/}
-  value=$(printf '%s' "$value" | sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g')
-  value=$(printf '%s' "$value" | tr -d '\000-\010\013\014\016-\037\177')
+  value=${value//$'\r'/}
+  value=${value//$'\e'/}
   printf '%s' "$value"
 }
 

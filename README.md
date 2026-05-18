@@ -2,90 +2,83 @@
 
 <p align="center">
   <img alt="Tor relay modes" src="https://img.shields.io/badge/Tor-guard%20%2F%20exit%20relay-7D4698?style=for-the-badge">
-  <img alt="Bash installer" src="https://img.shields.io/badge/Bash-interactive%20installer-1f425f?style=for-the-badge&logo=gnubash&logoColor=white">
-  <img alt="Debian and Ubuntu" src="https://img.shields.io/badge/Debian%20%2F%20Ubuntu-supported-a81d33?style=for-the-badge&logo=debian&logoColor=white">
+  <img alt="Version" src="https://img.shields.io/badge/v1.0.0--beta.1-prerelease-f2cc8f?style=for-the-badge">
+  <img alt="Bash installer" src="https://img.shields.io/badge/Bash-operator%20console-1f425f?style=for-the-badge&logo=gnubash&logoColor=white">
+  <img alt="Debian and Ubuntu" src="https://img.shields.io/badge/Debian%20%2F%20Ubuntu-Tor%20apt%20suites-a81d33?style=for-the-badge&logo=debian&logoColor=white">
   <img alt="MIT license" src="https://img.shields.io/badge/License-MIT-2b9348?style=for-the-badge">
 </p>
 
-This repo is a small, opinionated Bash installer for turning a fresh Debian or Ubuntu VPS into a public Tor relay. It can configure a Guard/middle relay or, when you intentionally choose it, an exit relay with the Tor Project's recommended exit basics. It is meant for the person who knows the practical details, like a relay nickname, contact address, bandwidth expectations, whether the server has IPv6, and whether this VPS is supposed to exit traffic, but does not want to hand-edit `torrc` at midnight.
+An interactive Bash operator console for setting up and maintaining a public Tor relay on a fresh Debian or Ubuntu VPS. It can configure a Guard/middle relay, or an exit relay when you explicitly choose the exit path and confirm the operational requirements.
 
-The installer uses `fzf` for the parts that benefit from a real selector: menus, MyFamily fingerprints, and nickname search results. If `fzf` is missing, it asks before installing it; otherwise it falls back to the built-in line interface. Use `--plain` if you want the line interface from the start.
-
-If the script detects an existing relay, it opens an operator tools menu instead of forcing you through the full setup again. From there you can manage `MyFamily`, run health checks, or use basic repair actions.
+It is designed for the normal relay-operator details: nickname, public contact string, bandwidth budget, ORPort, IPv6, firewall choice, and whether the machine is meant to be an exit relay. The script handles the boring sharp edges: Tor Project apt repository setup, key verification, torrc generation, backups, syntax checks, systemd, firewall rules, MyFamily fingerprints, and follow-up health checks.
 
 ## Status
 
-This is experimental software, but it works pretty well in real VPS testing so far. Treat it like a sharp tool: read it, run `--dry-run`, and only then let it touch a server.
+`v1.0.0-beta.1` is a prerelease. It is experimental privileged server software, so review it before running it, prefer `--dry-run` first, and use disposable VPS testing when you are unsure.
 
-Implementation note: this repository was built solely by **Codex 5.5 xhigh** from the project requirements and test feedback. Human input supplied the goal, review direction, and live VPS logs; the implementation itself was generated and iterated by Codex.
+This repository was built solely by **Codex 5.5 xhigh** from the project requirements, official Tor documentation, and live VPS test feedback. It works well in the tested paths, but the beta label is intentional: relay operators should still read the planned changes before approving them.
+
+## First Look
+
+These screenshots are rendered from a real `--plain --dry-run` capture under WSL Ubuntu 24.04.
+
+![Tor Relay Setup guided dry-run](docs/assets/tor-relay-setup-first-run.svg)
+
+![Tor Relay Setup final review dry-run](docs/assets/tor-relay-setup-review.svg)
 
 ## Quick Start
 
-Clone it, review it, and run it:
+Recommended path: download the tagged release asset, verify the checksum, review the script, then run it.
 
 ```bash
-git clone https://github.com/ljkx/tor-relay-setup.git
-cd tor-relay-setup
+VERSION="v1.0.0-beta.1"
+curl -fsSLO "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh"
+curl -fsSLO "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/SHA256SUMS"
+sha256sum -c SHA256SUMS
 less setup-tor-guard-relay.sh
+chmod +x setup-tor-guard-relay.sh
 ./setup-tor-guard-relay.sh --dry-run
 sudo ./setup-tor-guard-relay.sh
 ```
 
-Download and start it in one line:
+One-liner download and start:
 
 ```bash
-curl -fsSLo setup-tor-guard-relay.sh "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+VERSION="v1.0.0-beta.1"; curl -fsSLo setup-tor-guard-relay.sh "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
 ```
 
-With `wget` instead:
+Clone from GitHub:
 
 ```bash
-wget -O setup-tor-guard-relay.sh "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" && chmod +x setup-tor-guard-relay.sh && sudo ./setup-tor-guard-relay.sh
+git clone https://github.com/ljkx/tor-relay-setup.git
+cd tor-relay-setup
+git checkout v1.0.0-beta.1
+./setup-tor-guard-relay.sh --dry-run
+sudo ./setup-tor-guard-relay.sh
 ```
 
-Direct pipe mode also works on fresh VPSes after you have reviewed the script:
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" | sudo bash
-```
-
-With `wget` instead:
-
-```bash
-wget -qO- "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" | sudo bash
-```
-
-Dry-run from the remote script:
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/ljkx/tor-relay-setup/main/setup-tor-guard-relay.sh?$(date +%s)" | bash -s -- --dry-run
-```
-
-If GitHub's raw CDN ever serves an older copy, the `?$(date +%s)` part forces a fresh fetch. The startup banner also prints the script version.
-
-Show help:
+Useful modes:
 
 ```bash
 ./setup-tor-guard-relay.sh --help
-```
-
-Plain terminal mode:
-
-```bash
+./setup-tor-guard-relay.sh --version
 sudo ./setup-tor-guard-relay.sh --plain
+sudo ./setup-tor-guard-relay.sh --uninstall
 ```
 
-Remove traces of this tool, not Tor:
+Direct pipe mode is possible after review, but it is not the recommended path for privileged software:
 
 ```bash
-sudo ./setup-tor-guard-relay.sh --uninstall
+VERSION="v1.0.0-beta.1"; curl -fsSL "https://github.com/ljkx/tor-relay-setup/releases/download/${VERSION}/setup-tor-guard-relay.sh" | sudo bash
 ```
 
 ## Supported Systems
 
-The installer supports Debian and Ubuntu releases when the official Tor Project apt repository publishes packages for that release codename.
+The script supports systemd-based Debian-family VPSes when the official Tor Project apt repository publishes packages for the detected codename.
 
-Known-good examples include:
+The script checks `https://deb.torproject.org/torproject.org/dists/<codename>/Release` before adding the Tor repository. This makes support broader than a hardcoded version list while still refusing systems Tor does not publish for.
+
+Examples of Tor apt suites currently handled by this model include:
 
 - Debian 12 `bookworm`
 - Debian 13 `trixie`
@@ -95,70 +88,55 @@ Known-good examples include:
 - Ubuntu `questing`
 - Ubuntu 26.04 LTS `resolute`
 
-The script detects the OS codename from `/etc/os-release`, verifies that `https://deb.torproject.org/torproject.org/dists/<codename>/Release` exists, and then uses that codename for the Tor Project apt source.
+Requirements:
 
-The script expects a systemd-based Debian-family VPS with `apt`, `dpkg`, and either `amd64` or `arm64`, matching the architectures currently provided by the Tor Project Debian package repository.
+- Linux with systemd
+- Debian or Ubuntu family
+- `apt`, `dpkg`, and `systemctl`
+- `amd64` or `arm64`
+- a public IPv4 address for a normal public relay
+- enough disk space and inodes for apt package operations
 
-## What It Asks
+## What It Can Do
 
-The installer walks through the choices that actually matter:
-
-- Optional Linux system hostname change for fresh VPSes
-- Relay mode: Guard/middle or exit
-- Relay nickname
-- Public `ContactInfo` email or contact string
-- ORPort, default `9001`
-- Optional IPv6 ORPort
-- Exit relay options when exit mode is selected: provider readiness, reduced or default exit policy, optional IPv6 exiting, and local Unbound DNS setup
-- Bandwidth mode: steady monthly traffic budget, manual `RelayBandwidthRate` / `RelayBandwidthBurst`, hard monthly `AccountingMax`, or no relay-specific cap
-- Maximum monthly traffic such as `10TB`, provider quota style, and safety headroom when using the steady budget mode
-- Existing relay operator console: MyFamily, health checks, directory status, service controls, logs, configuration editor, backups, package tools, repair tools, and script-trace cleanup
-- Selector dependency bootstrap: optionally install `fzf` for searchable menus and MyFamily lists, or use `--plain`
-- Automatic package updates
-- Optional Nyx install for terminal relay monitoring
-- Firewall setup: use an existing firewall manager, or optionally install UFW, allow SSH first, allow the ORPort, and enable UFW
-- Basic hardening via Tor `SafeLogging 1` and optional `Sandbox 1`
-
-It shows a final summary before doing privileged work, then asks for confirmation again.
+- Configure a Guard/middle relay with `ExitRelay 0`.
+- Configure an exit relay only after explicit provider and abuse-handling confirmations.
+- Install Tor from the official Tor Project apt repository.
+- Verify the Tor Project signing key fingerprint.
+- Verify the selected `tor` apt candidate comes from `deb.torproject.org`.
+- Disable the local SOCKS listener with `SocksPort 0` for relay-only servers.
+- Ask for IPv6, default to the detected global IPv6 address on Enter, and warn when IPv6 is manually kept after a failed or skipped check.
+- Calculate steady bandwidth limits from a monthly traffic budget such as `10TB`.
+- Optionally install Nyx.
+- Optionally install `fzf` after the final reviewed summary for searchable menus.
+- Optionally install UFW, preserve detected SSH ports, open the ORPort, and enable UFW.
+- Manage MyFamily by nickname or fingerprint through Tor Metrics Onionoo.
+- Automatically add the relay's own fingerprint to MyFamily when available.
+- Validate candidate torrc files before replacing `/etc/tor/torrc`.
+- Create timestamped backups before replacing important files.
+- Open an existing-relay operator console instead of forcing setup again.
+- Remove traces of this script with `--uninstall` without removing Tor.
 
 ## What It Changes
 
-When confirmed, the script:
+After the final confirmation, the script may change:
 
-- Detects Debian/Ubuntu version and CPU architecture.
-- Optionally changes the Linux system hostname with `hostnamectl` and updates `/etc/hosts`.
-- Configures the official Tor Project apt repository in `/etc/apt/sources.list.d/tor.sources`.
-- Installs the Tor Project signing key at `/usr/share/keyrings/deb.torproject.org-keyring.gpg`.
-- Installs `tor`.
-- Installs `deb.torproject.org-keyring` when apt publishes it for the detected suite. New suites sometimes publish `tor` before the keyring package, so the script continues with the manually installed keyring file when needed.
-- Optionally installs `nyx` for terminal relay monitoring.
-- Backs up `/etc/tor/torrc` before replacing it with the generated relay configuration.
-- Writes `ExitRelay 0` for Guard/middle mode.
-- Writes `ExitRelay 1` for exit mode, with `ReducedExitPolicy 1` by default unless you choose Tor's broader default exit policy.
-- Optionally writes `IPv6Exit 1` when exit mode and IPv6 ORPort are both selected.
-- Optionally installs and starts `unbound` for exit relay DNS, backs up `/etc/resolv.conf`, and points the system resolver at `127.0.0.1`.
-- Optionally calculates steady bandwidth limits from a monthly traffic budget, including `RelayBandwidthRate`, `RelayBandwidthBurst`, `AccountingRule`, and `AccountingMax`.
-- When run on an existing relay, can resolve MyFamily members through Tor Metrics Onionoo by nickname or full fingerprint, then back up and update the `MyFamily` line in `/etc/tor/torrc`.
-- Asks before installing `fzf` from apt for searchable selectors, unless `--plain` or `--dry-run` is used.
-- If this script installs `fzf`, records that fact under `/var/lib/tor-relay-setup` so script-trace cleanup can offer to remove it later.
-- Optionally installs and configures `unattended-upgrades` for security and Tor updates.
-- Optionally opens the selected ORPort using detected `ufw`, active `firewalld`, or a supported `nftables` chain.
-- If no supported local firewall manager is installed, can install UFW, add an SSH allow rule before anything else, add the ORPort allow rule, and then enable UFW.
-- Enables and restarts `tor@default`.
-- Verifies Tor config syntax, service status, local ORPort listener, and Tor's post-start ORPort reachability self-test when possible.
-- Checks apt-related disk space and inode availability before package operations.
+- `/etc/hostname` and `/etc/hosts`, only if you choose a hostname change.
+- `/etc/apt/sources.list.d/tor.sources`.
+- `/usr/share/keyrings/deb.torproject.org-keyring.gpg`.
+- apt packages: `tor`, optional `nyx`, optional `fzf`, optional `ufw`, optional `unbound`, optional unattended-upgrades packages.
+- `/etc/tor/torrc`, after a backup and candidate syntax check.
+- `/etc/apt/apt.conf.d/52tor-relay-unattended-upgrades`.
+- `/etc/apt/apt.conf.d/20auto-upgrades`, when automatic updates are selected.
+- firewall rules, only after confirmation.
+- `/etc/resolv.conf`, only for exit relay DNS when Unbound is selected.
+- `/var/lib/tor-relay-setup`, a tiny state directory used for script-owned traces.
 
-Backups are timestamped, for example:
-
-```text
-/etc/tor/torrc.bak.20260518T120000Z
-```
-
-When the optional hostname change is selected, `/etc/hostname` and `/etc/hosts` are backed up before modification.
+It does not collect secrets, phone home, or implement telemetry.
 
 ## Generated torrc Shape
 
-Guard/middle mode follows the Tor Project's Middle/Guard relay guidance:
+Guard/middle mode:
 
 ```torrc
 Nickname MyRelay
@@ -167,9 +145,10 @@ ORPort 9001
 SocksPort 0
 ExitRelay 0
 SafeLogging 1
+Sandbox 1
 ```
 
-Exit mode uses Tor's exit relay guidance and defaults to the reduced exit policy for a first exit:
+Exit mode with the reduced policy:
 
 ```torrc
 Nickname MyExit
@@ -179,80 +158,63 @@ SocksPort 0
 ExitRelay 1
 ReducedExitPolicy 1
 SafeLogging 1
+Sandbox 1
 ```
 
-Optional settings are added only when selected, such as:
+Optional steady budget example for a `10TB` monthly quota, counted as combined inbound + outbound with 10% headroom:
 
 ```torrc
-ORPort [2001:db8::1234]:9001
-IPv6Exit 1
 RelayBandwidthRate 1864 KBytes
 RelayBandwidthBurst 9320 KBytes
 AccountingStart month 1 00:00
 AccountingRule sum
 AccountingMax 9216 GBytes
-Sandbox 1
 ```
 
-That example is the shape produced by steady budget mode for a `10TB` monthly provider quota counted as combined inbound + outbound traffic with 10% headroom. The exact numbers change with your provider quota style and chosen safety margin.
+## Existing Relay Console
 
-## Existing Relay Tools
+When `/etc/tor/torrc` already contains an `ORPort`, the script opens a relay console with:
 
-When an active Tor service or relay `ORPort` is detected, the script offers:
+- MyFamily manager
+- health check
+- Tor Metrics / Relay Search status
+- `tor@default` service controls
+- logs and ORPort self-test
+- safe config editor
+- torrc and identity-key backups
+- package tools
+- repair tools
+- local operator report
+- script-trace cleanup
+- full guided setup again
 
-- Manage `MyFamily`
-- Run a relay health check
-- Check published Tor Metrics / Relay Search status
-- Manage `tor@default` service controls
-- View recent or live logs
-- Edit common safe relay settings
-- Create or restore backups
-- Maintain packages and helper tools
-- Repair config, service, logs, or firewall
-- Write a local operator report for troubleshooting
-- Clean traces of this installer script without touching Tor
-- Run the full guided setup again
-- Exit
+The MyFamily manager stores fingerprints, not nicknames. Nickname lookup uses Onionoo, shows candidate relays, and asks you to choose the exact fingerprint because nicknames are not unique.
 
-The MyFamily manager behaves like a small editor. It automatically adds and pins this relay's own fingerprint when it can read it, then lets you add relays by nickname or full 40-character fingerprint, delete selected entries, check published status, save, or discard changes. With `fzf`, lists are searchable, Space marks fingerprints, the preview pane shows row context, and `d` accepts a delete selection. The editor actions are `a` add, `d` delete, `c` check, `s` save, and `q` quit.
-
-Nicknames are not unique, so nickname lookup uses Tor Metrics Onionoo, shows candidates with fingerprints and running status, and asks you to choose the exact relay number before writing anything.
-
-The script stores `MyFamily` as fingerprints, not nicknames. It backs up `/etc/tor/torrc`, keeps a single managed `MyFamily` line, verifies the Tor config, and offers to restart `tor@default`.
-
-Best practice: apply the same `MyFamily` value on every relay you control, including each relay's own fingerprint. Onionoo and Relay Search may need time to show the new family relationship after the relays publish updated descriptors.
+With `fzf`, Space marks rows and the preview pane shows row context. In delete screens, `d` continues to deletion confirmation. In plain mode, type the listed numbers.
 
 ## Security Notes
 
-- Always review privileged scripts before running them on a server.
-- `ContactInfo` is public. Use an address or contact string you are comfortable publishing.
-- The steady bandwidth calculator is designed to keep the relay useful throughout the month instead of racing into `AccountingMax` hibernation. It uses a safety headroom because Tor's accounting uses powers of two and does not count every byte a VPS provider may bill.
-- Provider traffic accounting differs. If you are unsure whether your provider counts inbound + outbound or outbound only, choose the combined inbound + outbound option.
-- Use `MyFamily` for every relay controlled by the same operator. The installer keeps the local fingerprint pinned and resolves nicknames to fingerprints because nicknames can collide.
-- Guard/middle mode writes `ExitRelay 0`; exit mode writes `ExitRelay 1` and the exit policy you selected.
-- Exit relays need more operational care than Guard/middle relays. Use a provider that allows exit traffic, plan abuse handling, and consider reverse DNS / WHOIS notes that clearly identify the server as a Tor exit.
-- For exit mode, the script can install Unbound and switch `/etc/resolv.conf` to `nameserver 127.0.0.1`, matching Tor's Debian/Ubuntu exit relay DNS guidance. It backs up the old resolver config first.
-- The optional `/etc/resolv.conf` lock uses `chattr +i`. That can be useful on VPSes where DHCP keeps rewriting DNS, but you must unlock it manually with `sudo chattr -i /etc/resolv.conf` before future resolver changes.
-- Keep SSH access open. The script does not change firewall defaults silently; it asks before installing or enabling UFW.
-- When installing/enabling UFW, the script allows the detected SSH server port before enabling the firewall. Still keep a provider console or recovery path handy when changing firewall state on a VPS.
-- Cloud firewalls are outside the VPS. Open the ORPort in your provider panel if required.
-- The IPv6 prompt's early connectivity check is outbound-only and follows Tor's documented ping test against directory authority IPv6 addresses. Some networks make ICMPv6/ping awkward, so the script shows per-address results and lets an operator keep IPv6 enabled after manual verification.
-- Inbound ORPort reachability is checked only after the firewall rule is applied and Tor restarts.
-- The optional system hostname is local server identity only. It is separate from the public Tor relay `Nickname`.
-- Tor relay operators should keep Tor and the operating system updated.
-- Leave Tor logs at notice level and keep `SafeLogging` enabled unless debugging a specific issue.
-- Do not publish real-time relay/system metrics. Tor recommends aggregation windows of at least a day when publishing statistics.
-- If you operate multiple relays, use the existing relay tools to keep `MyFamily` in sync on every relay.
-- After the relay is running, consider securely backing up `/var/lib/tor/keys`. Those identity keys are sensitive.
-- The script collects no secrets and implements no telemetry.
+- Review any privileged script before running it.
+- `ContactInfo` is public in relay directories.
+- MyFamily should include every relay controlled by the same operator, and the same family should be applied on each relay.
+- Guard/middle mode writes `ExitRelay 0`; exit mode writes `ExitRelay 1`.
+- Exit relays need provider permission, abuse handling, and clear public operator contact posture.
+- Exit DNS uses local Unbound when selected, following Tor's Debian/Ubuntu exit guidance.
+- Do not enable IPv6 unless it actually works. If you override a failed or skipped IPv6 check, treat IPv6 as unverified until Relay Search shows the IPv6 OR address.
+- Keep SSH access open. The script allows detected SSH ports before enabling UFW, but provider consoles are still wise when changing firewalls.
+- Cloud firewalls live outside the VPS. Open the ORPort in the provider panel too.
+- Leave `SafeLogging 1` enabled.
+- Do not publish real-time relay/system metrics; Tor recommends aggregation windows of at least a day when publishing statistics.
+- Back up `/var/lib/tor/keys` after the relay is stable. Those identity keys are sensitive.
 
 ## Relay Lifecycle
 
-New relays do not receive full traffic immediately. This is normal, not a sign that the script failed.
+New relays do not receive full traffic immediately.
 
-- Tor's post-install guidance says a new relay should appear in Relay Search after about 3 hours.
-- Traffic can be low for the first few days while bandwidth authorities measure the relay.
-- Guard behavior depends on stable uptime and sufficient bandwidth; it can take time to receive and fully ramp into Guard usage.
+- Relay Search usually sees a new relay after about 3 hours.
+- Bandwidth authorities need time to measure it.
+- Guard usage depends on stability and can take longer to ramp up.
+- MyFamily changes can take hours to appear everywhere.
 
 Relay Search:
 
@@ -262,7 +224,7 @@ https://metrics.torproject.org/rs.html
 
 ## Troubleshooting
 
-Check service state:
+Service status:
 
 ```bash
 systemctl status tor@default --no-pager
@@ -274,7 +236,7 @@ Follow logs:
 journalctl -u tor@default -f
 ```
 
-Look for the expected ORPort self-test:
+Look for ORPort self-test:
 
 ```bash
 journalctl -u tor@default --since "1 hour ago" | grep -F "Self-testing indicates"
@@ -286,27 +248,7 @@ Check the listener:
 ss -ltn | grep ':9001'
 ```
 
-Open Nyx if you installed it:
-
-```bash
-sudo -u debian-tor nyx
-```
-
-Run the script again for existing relay tools:
-
-```bash
-sudo ./setup-tor-guard-relay.sh
-```
-
-Check Unbound on an exit relay:
-
-```bash
-systemctl status unbound --no-pager
-getent hosts deb.torproject.org
-cat /etc/resolv.conf
-```
-
-Verify the Tor config manually:
+Verify torrc:
 
 ```bash
 tor --verify-config -f /etc/tor/torrc
@@ -314,17 +256,17 @@ tor --verify-config -f /etc/tor/torrc
 
 Common issues:
 
-- `apt` reports `No space left on device`: the VPS filesystem or inode table is full. Check `df -h` and `df -ih`, then free space before re-running.
-- Provider firewall or security group does not allow inbound TCP ORPort.
-- Local firewall did not have a supported manager or ruleset.
-- IPv6 was enabled without working IPv6 connectivity. The early ping check is outbound ICMPv6; the later Tor self-test is the better signal for inbound ORPort reachability.
-- Port is already in use.
-- VPS does not have a public IPv4 address.
-- Exit mode was selected on a provider that blocks exit traffic or outbound DNS.
-- `/etc/resolv.conf` was locked with `chattr +i` and needs to be unlocked before changing DNS again.
-- Relay hibernates before the end of the month: lower the steady budget rate, increase safety headroom, or check whether the provider counts combined inbound + outbound traffic while Tor was configured with a less conservative accounting rule.
+- `apt` reports `No space left on device`: check `df -h` and `df -ih`, free space, then retry.
+- checksum mismatch: delete the downloaded files and fetch the release asset again; do not run a mismatched script.
+- GitHub release asset missing: use the clone path and check out the tag, or wait for the release upload to finish.
+- apt signing/keyring failure: check system time, DNS, and whether the expected Tor signing key fingerprint is shown.
+- Tor apt suite missing: the detected Debian/Ubuntu codename is not published by Tor yet.
+- ORPort not reachable: check UFW/firewalld/nftables, provider firewall, NAT, and cloud security groups.
+- IPv6 enabled but not published: verify outbound IPv6, local IPv6 listener, provider firewall, and Relay Search after a few hours.
+- relay hibernates early: lower the steady rate, increase headroom, or choose the combined inbound + outbound accounting rule.
+- exit DNS broken: check `systemctl status unbound --no-pager`, `unbound-checkconf`, and `/etc/resolv.conf`.
 
-If an earlier package operation was interrupted by a full disk, clear the apt cache and retry after freeing space:
+Useful cleanup after an interrupted apt operation:
 
 ```bash
 sudo apt clean
@@ -332,47 +274,60 @@ sudo rm -rf /var/lib/apt/lists/partial/*
 sudo apt update
 ```
 
-Restore an earlier resolver backup if you experimented with exit DNS and need to roll back:
-
-```bash
-sudo chattr -i /etc/resolv.conf 2>/dev/null || true
-sudo cp -a /etc/resolv.conf.bak.YYYYMMDDTHHMMSSZ /etc/resolv.conf
-```
-
 ## Updating
 
-If unattended upgrades were enabled, security and Tor package updates should be applied automatically.
+If unattended upgrades were enabled, security and Tor package updates should happen automatically.
 
 Manual update:
 
 ```bash
 sudo apt update
 sudo apt install --only-upgrade tor
-apt-cache policy deb.torproject.org-keyring
+apt-cache policy tor deb.torproject.org-keyring
 sudo systemctl restart tor@default
 ```
 
+Update this tool by downloading a newer tagged release asset and running `--dry-run` first.
+
 ## Cleaning Up This Tool
 
-To remove traces of this installer itself without touching Tor, run:
+To remove traces of this installer itself without touching Tor:
 
 ```bash
 sudo ./setup-tor-guard-relay.sh --uninstall
 ```
 
-That cleanup mode can remove the downloaded script or cloned repo checkout, the script's tiny state directory under `/var/lib/tor-relay-setup`, temporary operator reports, and optionally `fzf` if this script recorded installing it.
+Cleanup mode can remove:
 
-It deliberately does **not** remove Tor, `/etc/tor/torrc`, `/var/lib/tor`, relay identity keys, firewall rules, logs, the Tor apt repository, or Unbound. Those are relay state, not script traces.
+- the script state directory under `/var/lib/tor-relay-setup`
+- operator reports that contain this tool's report header
+- the downloaded standalone script file
+- a clean cloned repo checkout with the expected GitHub remote
+- `fzf`, only if this script recorded that it installed `fzf`
 
-If you actually want to decommission a relay, review the commands yourself first. In particular, deleting `/var/lib/tor` destroys the relay identity keys and loses relay reputation.
+Cleanup mode deliberately does **not** remove Tor, `/etc/tor/torrc`, `/var/lib/tor`, relay identity keys, firewall rules, logs, the Tor apt repository, Unbound, or hostname changes. Those are relay/system state, not script traces.
+
+If you actually want to retire a relay, plan that separately. Deleting `/var/lib/tor` destroys relay identity keys and loses relay reputation.
+
+## Development Checks
+
+```bash
+bash -n setup-tor-guard-relay.sh
+shellcheck -S warning -e SC2034,SC2178 setup-tor-guard-relay.sh tests/test-functions.bash
+bash tests/test-functions.bash
+./setup-tor-guard-relay.sh --help
+./setup-tor-guard-relay.sh --version
+```
+
+GitHub Actions runs these checks on push and pull request.
 
 ## Official Tor Sources
 
-This script was built from current official Tor documentation, including:
+This script follows official Tor Project documentation first:
 
 - [Tor relay technical setup](https://community.torproject.org/relay/setup/)
 - [Debian/Ubuntu Middle/Guard relay setup](https://community.torproject.org/relay/setup/guard/debian-ubuntu/)
-- [Types of relays on the Tor network](https://community.torproject.org/relay/types-of-relays/)
+- [Types of relays](https://community.torproject.org/relay/types-of-relays/)
 - [Exit relay setup](https://community.torproject.org/relay/setup/exit/)
 - [Debian/Ubuntu exit relay DNS setup](https://community.torproject.org/relay/setup/exit/debian-ubuntu/)
 - [Tor Debian/Ubuntu package installation](https://support.torproject.org/little-t-tor/getting-started/installing/)
@@ -385,4 +340,4 @@ This script was built from current official Tor documentation, including:
 - [Expectations for relay operators](https://community.torproject.org/policies/relays/expectations-for-relay-operators/)
 - [Lifecycle of a new relay](https://blog.torproject.org/lifecycle-of-a-new-relay/)
 
-When in doubt, prefer Tor Project documentation over third-party guides.
+When behavior is unclear or distro-specific, prefer those sources over third-party guides.

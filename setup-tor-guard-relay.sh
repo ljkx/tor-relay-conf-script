@@ -7,19 +7,21 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.5.0"
+VERSION="1.0.0-beta.1"
 DRY_RUN=0
-DECOMMISSION_MODE=0
+CLEANUP_MODE=0
 USE_FZF=0
 PLAIN_TUI=0
+INSTALL_FZF=0
 
 TMP_DIR=""
 TIMESTAMP=""
 BACKUPS_CREATED=()
+RUN_LOCK_PATH=""
+LAST_BACKUP_PATH=""
 STEP_NUMBER=0
 CURRENT_STEP_LABEL=""
 CURRENT_STEP_TITLE=""
-SELECTED_RELAY_FINGERPRINT=""
 SELECTED_RELAY_FINGERPRINTS=()
 
 OS_ID=""
@@ -37,6 +39,7 @@ CONTACT_INFO=""
 OR_PORT="9001"
 ENABLE_IPV6=0
 IPV6_ADDRESS=""
+IPV6_MANUAL_OVERRIDE=0
 RELAY_MODE="guard"
 EXIT_POLICY_MODE="reduced"
 EXIT_ALLOW_IPV6=0
@@ -64,11 +67,13 @@ FIREWALL_KIND="none"
 FIREWALL_STATE="unavailable"
 INSTALL_UFW=0
 ENABLE_UFW_AFTER_RULES=0
-SSH_PORT_FOR_UFW="22"
+SSH_PORTS_FOR_UFW="22"
 ENABLE_TOR_SANDBOX=1
+INITIAL_MYFAMILY_AFTER_SETUP=0
 
 TORRC_PATH="/etc/tor/torrc"
 TOR_APT_BASE_URL="https://deb.torproject.org/torproject.org"
+TOR_SIGNING_KEY_FINGERPRINT="A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89"
 TOR_SOURCES_PATH="/etc/apt/sources.list.d/tor.sources"
 TOR_KEYRING_PATH="/usr/share/keyrings/deb.torproject.org-keyring.gpg"
 UNATTENDED_TOR_PATH="/etc/apt/apt.conf.d/52tor-relay-unattended-upgrades"
@@ -168,8 +173,8 @@ parse_args() {
       --dry-run)
         DRY_RUN=1
         ;;
-      --uninstall|--decommission)
-        DECOMMISSION_MODE=1
+      --uninstall)
+        CLEANUP_MODE=1
         ;;
       --plain|--no-tui)
         PLAIN_TUI=1
@@ -195,7 +200,7 @@ parse_args() {
 banner() {
   printf '\n%bTor Relay Setup%b %s\n' "$BOLD$CYAN" "$RESET" "$VERSION"
   printf '%s\n' "Guided installer for public Guard/middle and exit relays."
-  printf '%s\n\n' "It may install fzf for polished selectors; relay changes are reviewed before apply."
+  printf '%s\n\n' "It reviews privileged changes before applying them."
 }
 
 section() {
@@ -244,6 +249,25 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+acquire_run_lock() {
+  local lock_dir="/run/lock"
+
+  if [[ ! -d "$lock_dir" || ! -w "$lock_dir" ]]; then
+    lock_dir="/tmp"
+  fi
+  RUN_LOCK_PATH="${lock_dir%/}/tor-relay-setup.lock"
+
+  if ! command_exists flock; then
+    warn "flock is not available; continuing without a single-run lock."
+    return 0
+  fi
+
+  exec 9>"$RUN_LOCK_PATH"
+  if ! flock -n 9; then
+    die "Another ${SCRIPT_NAME} run appears to be active (${RUN_LOCK_PATH})."
+  fi
+}
+
 fzf_available() {
   ((USE_FZF)) && command_exists fzf && [[ -e /dev/tty && -r /dev/tty ]]
 }
@@ -266,31 +290,11 @@ bootstrap_tui() {
 
   if ((DRY_RUN)); then
     warn "fzf is not installed. Dry run will use the built-in line interface."
-    info "Would install fzf for polished selectors during a real run."
     return 0
   fi
 
-  if ! ask_yes_no "Install fzf now for searchable selector menus?" "yes"; then
-    warn "Using the built-in line interface. You can install fzf later from Packages and Tools."
-    return 0
-  fi
-
-  command_exists df && {
-    check_path_capacity /var/lib/apt/lists 512000 2048
-    check_path_capacity /var/cache/apt/archives 512000 2048
-    check_path_capacity /var 512000 2048
-  }
-
-  info "Installing fzf for searchable selectors."
-  if env DEBIAN_FRONTEND=noninteractive apt-get update \
-    && env DEBIAN_FRONTEND=noninteractive apt-get install -y fzf \
-    && command_exists fzf; then
-    USE_FZF=1
-    mark_script_installed_fzf
-    success "Polished selector mode enabled with fzf."
-  else
-    warn "Could not install fzf. Falling back to the built-in line interface."
-  fi
+  warn "fzf is not installed. This run will use the built-in line interface."
+  info "You can choose to install fzf in the reviewed maintenance step or from Packages and Tools later."
 }
 
 python_command() {
@@ -314,6 +318,50 @@ apt_package_available() {
   command_exists apt-cache || return 1
   candidate=$(apt-cache policy "$package" 2>/dev/null | awk '/Candidate:/ { print $2; exit }')
   [[ -n "$candidate" && "$candidate" != "(none)" ]]
+}
+
+apt_package_installed() {
+  local package=$1
+  command_exists dpkg-query || return 1
+  dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -Fq 'install ok installed'
+}
+
+tor_candidate_from_tor_project() {
+  command_exists apt-cache || return 1
+  apt-cache policy tor 2>/dev/null | awk '
+    /^[[:space:]]+\*\*\*/ {
+      in_candidate = 1
+      next
+    }
+    in_candidate && /deb\.torproject\.org\/torproject\.org/ {
+      ok = 1
+      exit
+    }
+    in_candidate && /^[[:space:]]+[0-9]/ {
+      exit
+    }
+    END {
+      exit ok ? 0 : 1
+    }
+  '
+}
+
+verify_tor_signing_key_file() {
+  local key_file=$1
+  local fingerprint
+
+  if ((DRY_RUN)); then
+    info "Would verify Tor Project signing key fingerprint ${TOR_SIGNING_KEY_FINGERPRINT}."
+    return 0
+  fi
+
+  fingerprint=$(gpg --show-keys --with-colons --fingerprint "$key_file" 2>/dev/null \
+    | awk -F: '$1 == "fpr" { print toupper($10); exit }')
+
+  if [[ "$fingerprint" != "$TOR_SIGNING_KEY_FINGERPRINT" ]]; then
+    die "Unexpected Tor Project signing key fingerprint '${fingerprint:-unreadable}'. Expected ${TOR_SIGNING_KEY_FINGERPRINT}."
+  fi
+  success "Verified Tor Project signing key fingerprint."
 }
 
 tor_project_suite_url() {
@@ -460,12 +508,12 @@ read_reply() {
   local variable_name=$1
 
   if [[ -t 1 && -e /dev/tty && -r /dev/tty ]]; then
-    if IFS= read -r "$variable_name" < /dev/tty 2>/dev/null; then
+    if IFS= read -r "${variable_name?}" < /dev/tty 2>/dev/null; then
       return 0
     fi
   fi
 
-  if IFS= read -r "$variable_name"; then
+  if IFS= read -r "${variable_name?}"; then
     return 0
   fi
 
@@ -519,6 +567,7 @@ choose_with_fzf() {
   local input_file=$4
   local expect_keys=${5:-}
   local prompt_label="${title}> "
+  # shellcheck disable=SC2054
   local -a args=(
     --height=80%
     --reverse
@@ -539,6 +588,7 @@ choose_with_fzf() {
       args+=(--multi --bind=space:toggle --header="Space toggles rows. Enter accepts; Esc cancels.")
       ;;
     delete)
+      # shellcheck disable=SC2054
       args+=(--multi --bind=space:toggle,d:accept --header="Space marks rows. Press d or Enter to continue to delete confirmation; Esc cancels.")
       ;;
     single)
@@ -552,7 +602,7 @@ choose_with_fzf() {
       ;;
   esac
 
-  FZF_DEFAULT_OPTS= fzf "${args[@]}" < "$input_file" > "$output_file"
+  env FZF_DEFAULT_OPTS= fzf "${args[@]}" < "$input_file" > "$output_file"
 }
 
 choose_menu() {
@@ -813,10 +863,29 @@ valid_system_hostname() {
 
 valid_ipv6_address() {
   local value=$1
+  local python_bin
   [[ "$value" == *:* ]] || return 1
   [[ "$value" != *" "* ]] || return 1
   [[ "$value" != *"["* && "$value" != *"]"* ]] || return 1
   [[ "$value" != */* ]] || return 1
+
+  if python_bin=$(python_command); then
+    "$python_bin" - "$value" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.IPv6Address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+
+if address.is_link_local or address.is_loopback or address.is_multicast or address.is_unspecified:
+    raise SystemExit(1)
+PY
+    return $?
+  fi
+
+  [[ "$value" =~ ^[0-9A-Fa-f:.]+$ ]]
 }
 
 torrc_quote() {
@@ -886,8 +955,8 @@ detect_firewall() {
     local ufw_status=""
     ufw_status=$(ufw status 2>/dev/null | head -n 1 || true)
     case "${ufw_status,,}" in
-      *active*) FIREWALL_STATE="active" ;;
       *inactive*) FIREWALL_STATE="inactive" ;;
+      *active*) FIREWALL_STATE="active" ;;
       *) FIREWALL_STATE="installed" ;;
     esac
     return 0
@@ -917,13 +986,23 @@ detect_firewall() {
 detect_ssh_port() {
   local port=""
   local config
+  local -a ports=()
+  local candidate
+
+  if command_exists sshd; then
+    while IFS= read -r candidate; do
+      [[ "$candidate" =~ ^[0-9]+$ ]] || continue
+      ports+=("$candidate")
+    done < <(sshd -T 2>/dev/null | awk 'tolower($1) == "port" { print $2 }' || true)
+  fi
 
   if [[ -n "${SSH_CONNECTION:-}" ]]; then
     # SSH_CONNECTION: client-ip client-port server-ip server-port
     port=$(awk '{ print $4 }' <<< "$SSH_CONNECTION")
+    [[ "$port" =~ ^[0-9]+$ ]] && ports+=("$port")
   fi
 
-  if [[ -z "$port" ]]; then
+  if ((${#ports[@]} == 0)); then
     for config in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
       [[ -r "$config" ]] || continue
       port=$(awk '
@@ -933,15 +1012,15 @@ detect_ssh_port() {
           exit
         }
       ' "$config")
-      [[ -n "$port" ]] && break
+      [[ -n "$port" ]] && ports+=("$port")
     done
   fi
 
-  if [[ -n "$port" && "$port" =~ ^[0-9]+$ ]]; then
-    SSH_PORT_FOR_UFW=$port
-  else
-    SSH_PORT_FOR_UFW="22"
+  if ((${#ports[@]} == 0)); then
+    ports=("22")
   fi
+
+  SSH_PORTS_FOR_UFW=$(printf '%s\n' "${ports[@]}" | awk '!seen[$0]++' | paste -sd ' ' -)
 }
 
 collect_firewall_options() {
@@ -1190,14 +1269,17 @@ collect_ipv6() {
       warn "This test is ICMPv6/ping-based. It can fail even when inbound IPv6 ORPort reachability looks fine."
       warn "Tor still warns that enabling IPv6 without working IPv6 connectivity can leave the relay unused."
       if ask_yes_no "Keep IPv6 ORPort anyway because you verified IPv6 manually?" "no"; then
+        IPV6_MANUAL_OVERRIDE=1
         warn "Keeping IPv6 ORPort enabled by explicit operator override."
       else
         ENABLE_IPV6=0
         IPV6_ADDRESS=""
+        IPV6_MANUAL_OVERRIDE=0
       fi
     fi
   else
     warn "Skipped outbound IPv6 connectivity check. Only keep IPv6 enabled if you know it works."
+    IPV6_MANUAL_OVERRIDE=1
   fi
 }
 
@@ -1209,9 +1291,10 @@ collect_exit_options() {
   info "A dedicated server, provider permission, clear abuse contact handling, and useful reverse DNS/WHOIS notes are recommended for exit operators."
 
   if ! ask_yes_no "Have you confirmed this provider allows Tor exit traffic and that abuse handling is planned?" "no"; then
-    if ! ask_yes_no "Continue configuring exit mode anyway?" "no"; then
-      die "Exit relay setup aborted. Re-run and choose Guard/middle mode if that is what you want."
-    fi
+    die "Exit relay setup aborted. Confirm provider permission and abuse handling first, or re-run and choose Guard/middle mode."
+  fi
+  if ! ask_yes_no "Have you prepared a public exit notice or abuse-contact explanation for complaints?" "no"; then
+    die "Exit relay setup aborted. Prepare exit operator contact/notice handling before publishing an exit relay."
   fi
 
   if ask_yes_no "Use Tor's ReducedExitPolicy for a first exit relay?" "yes"; then
@@ -1243,6 +1326,18 @@ collect_exit_options() {
   else
     CONFIGURE_UNBOUND=0
     warn "You chose not to configure Unbound. Make sure DNS resolution is reliable and not using a large public resolver."
+  fi
+}
+
+collect_initial_myfamily() {
+  section "Relay Family"
+
+  info "Use MyFamily when you control more than one public Tor relay."
+  if ask_yes_no "Do you control other Tor relays that should be in MyFamily?" "no"; then
+    INITIAL_MYFAMILY_AFTER_SETUP=1
+    info "After Tor starts and has a local fingerprint, the operator console will open the MyFamily manager."
+  else
+    INITIAL_MYFAMILY_AFTER_SETUP=0
   fi
 }
 
@@ -1400,6 +1495,14 @@ calculate_steady_monthly_limits() {
     return 1
   fi
 
+  if ((rate_kbytes < 1221)); then
+    warn "That budget calculates to ~$(format_mbits_from_kbytes "$rate_kbytes") Mbit/s, below Tor's practical 10 Mbit/s relay guidance."
+    return 1
+  fi
+  if ((rate_kbytes < 1954)); then
+    warn "That budget calculates to ~$(format_mbits_from_kbytes "$rate_kbytes") Mbit/s. Tor recommends 16 Mbit/s or more when possible."
+  fi
+
   burst_kbytes=$((rate_kbytes * 5))
 
   CONFIGURE_RELAY_BANDWIDTH=1
@@ -1528,6 +1631,15 @@ collect_maintenance_options() {
     INSTALL_NYX=1
   else
     INSTALL_NYX=0
+  fi
+
+  if ! ((PLAIN_TUI)) && ! command_exists fzf; then
+    info "fzf enables searchable menus and nicer MyFamily selectors on future runs."
+    if ask_yes_no "Install fzf after the final review?" "yes"; then
+      INSTALL_FZF=1
+    else
+      INSTALL_FZF=0
+    fi
   fi
 
   collect_firewall_options
@@ -1679,14 +1791,21 @@ build_resolv_conf() {
 backup_file() {
   local target=$1
   local backup
+  local suffix=0
 
+  LAST_BACKUP_PATH=""
   [[ -e "$target" || -L "$target" ]] || return 0
 
-  backup="${target}.bak.${TIMESTAMP}"
+  backup="${target}.bak.${TIMESTAMP:-$(date -u '+%Y%m%dT%H%M%SZ')}"
+  while [[ -e "$backup" || -L "$backup" ]]; do
+    suffix=$((suffix + 1))
+    backup="${target}.bak.${TIMESTAMP:-$(date -u '+%Y%m%dT%H%M%SZ')}.${suffix}"
+  done
   if ((DRY_RUN)); then
     info "Would back up ${target} to ${backup}"
   else
     cp -a -- "$target" "$backup"
+    LAST_BACKUP_PATH=$backup
     BACKUPS_CREATED+=("$backup")
     success "Backed up ${target} to ${backup}"
   fi
@@ -1696,6 +1815,9 @@ install_file_if_changed() {
   local source=$1
   local target=$2
   local mode=${3:-0644}
+  local target_dir
+  local target_base
+  local temp_target
 
   if [[ -f "$target" ]] && cmp -s "$source" "$target"; then
     success "Already current: ${target}"
@@ -1707,7 +1829,12 @@ install_file_if_changed() {
     info "Would install ${target}"
     print_command install -D -m "$mode" "$source" "$target"
   else
-    install -D -m "$mode" "$source" "$target"
+    target_dir=$(dirname "$target")
+    target_base=$(basename "$target")
+    install -d -m 0755 "$target_dir"
+    temp_target=$(mktemp "${target_dir%/}/.${target_base}.tmp.XXXXXX")
+    install -m "$mode" "$source" "$temp_target"
+    mv -f -- "$temp_target" "$target"
     success "Installed ${target}"
   fi
 }
@@ -1721,16 +1848,16 @@ tor_service_active() {
 }
 
 existing_tor_relay_detected() {
-  if tor_service_active; then
-    return 0
-  fi
-
   if torrc_exists && awk '
     /^[[:space:]]*#/ { next }
     /^[[:space:]]*ORPort[[:space:]]+/ { found = 1 }
     END { exit found ? 0 : 1 }
   ' "$TORRC_PATH"; then
     return 0
+  fi
+
+  if tor_service_active; then
+    warn "${TOR_SERVICE} is active, but no ORPort was found in ${TORRC_PATH}; treating it as a Tor client or incomplete relay config."
   fi
 
   return 1
@@ -1900,8 +2027,7 @@ select_relay_fingerprint() {
   local running
   local addresses
 
-  SELECTED_RELAY_FINGERPRINT=""
-  SELECTED_RELAY_FINGERPRINTS=()
+SELECTED_RELAY_FINGERPRINTS=()
 
   if [[ "$query" =~ ^(.+)[[:space:]]+#?([0-9]+)$ ]]; then
     query=$(trim "${BASH_REMATCH[1]}")
@@ -1962,11 +2088,9 @@ select_relay_fingerprint() {
   ((${#SELECTED_RELAY_FINGERPRINTS[@]})) || return 1
 
   if ask_yes_no "Add selected fingerprint(s) to MyFamily?" "yes"; then
-    SELECTED_RELAY_FINGERPRINT=${SELECTED_RELAY_FINGERPRINTS[0]}
     return 0
   fi
 
-  SELECTED_RELAY_FINGERPRINT=""
   SELECTED_RELAY_FINGERPRINTS=()
   return 1
 }
@@ -1998,6 +2122,7 @@ write_myfamily_to_torrc() {
     }
   ' "$TORRC_PATH" > "$temp_torrc"
 
+  verify_tor_config_file "$temp_torrc"
   install_file_if_changed "$temp_torrc" "$TORRC_PATH" "0644"
 }
 
@@ -2104,6 +2229,7 @@ add_myfamily_member() {
 
 remove_myfamily_member() {
   local array_name=$1
+  # shellcheck disable=SC2178
   local -n family_array=$array_name
   local local_fp=$2
   local selection
@@ -2113,6 +2239,7 @@ remove_myfamily_member() {
   local index
   local removed
   local removed_count=0
+  local delete_title="MyFamily fingerprints: type numbers to delete"
 
   if ((${#family_array[@]} == 0)); then
     warn "There are no fingerprints to remove."
@@ -2128,7 +2255,11 @@ remove_myfamily_member() {
     fi
   done
 
-  if ! choose_checklist selections "MyFamily fingerprints: Space selects, d deletes" --delete "${remove_options[@]}"; then
+  if tui_available; then
+    delete_title="MyFamily fingerprints: Space selects, d deletes"
+  fi
+
+  if ! choose_checklist selections "$delete_title" --delete "${remove_options[@]}"; then
     warn "No fingerprints selected for deletion."
     return 0
   fi
@@ -2452,8 +2583,8 @@ apply_existing_torrc_change() {
   local description=$2
 
   ensure_timestamp
+  verify_tor_config_file "$candidate"
   install_file_if_changed "$candidate" "$TORRC_PATH" "0644"
-  verify_tor_config
   if ask_yes_no "Reload Tor now to apply ${description}?" "yes"; then
     reload_or_restart_tor
   else
@@ -2829,9 +2960,23 @@ package_tools_menu() {
         install_nyx_package
         ;;
       5)
+        local fzf_was_installed=0
+        if apt_package_installed fzf; then
+          fzf_was_installed=1
+        fi
         check_apt_capacity
         run "Installing fzf" env DEBIAN_FRONTEND=noninteractive apt-get install -y fzf
-        mark_script_installed_fzf
+        if ((DRY_RUN)); then
+          info "Would record that this script installed fzf."
+        elif command_exists fzf && ((fzf_was_installed == 0)); then
+          mark_script_installed_fzf
+          if ! ((PLAIN_TUI)); then
+            USE_FZF=1
+            success "Polished selector mode enabled with fzf for this session."
+          fi
+        elif command_exists fzf; then
+          success "fzf is installed; not marking it as script-installed because it was already present."
+        fi
         ;;
       6|"")
         return 0
@@ -2870,6 +3015,11 @@ repo_looks_like_this_project() {
   git -C "$repo_root" remote -v 2>/dev/null | grep -Eq 'github\.com[:/]ljkx/tor-relay-setup(\.git)?'
 }
 
+repo_clean_for_deletion() {
+  local repo_root=$1
+  [[ -z "$(git -C "$repo_root" status --porcelain 2>/dev/null)" ]]
+}
+
 safe_remove_script_path() {
   local target=$1
   [[ -n "$target" && -e "$target" ]] || return 0
@@ -2892,6 +3042,10 @@ remove_tmp_operator_reports() {
   local report
   for report in /tmp/tor-relay-report.*.txt; do
     [[ -e "$report" ]] || continue
+    if ! head -n 1 "$report" 2>/dev/null | grep -Fxq "Tor Relay Operator Report"; then
+      warn "Skipping ${report}; it does not have this tool's report header."
+      continue
+    fi
     if ((DRY_RUN)); then
       info "Would remove ${report}"
     else
@@ -2925,11 +3079,21 @@ cleanup_script_traces() {
   fi
 
   if [[ -n "$repo_root" ]] && repo_looks_like_this_project "$repo_root"; then
-    cleanup_options+=("repo" "$repo_root" "delete this cloned tor-relay-setup checkout" "destructive")
-  elif [[ -n "$script_path" ]]; then
+    if ! repo_clean_for_deletion "$repo_root"; then
+      warn "Repo checkout has local changes or untracked files, so it will not be offered for deletion: ${repo_root}"
+    else
+      cleanup_options+=("repo" "$repo_root" "delete this clean cloned tor-relay-setup checkout" "destructive")
+    fi
+  fi
+
+  if [[ -z "$repo_root" || ! -d "$repo_root/.git" ]]; then
+    if [[ -n "$script_path" ]]; then
+      cleanup_options+=("script" "$script_path" "delete this downloaded script file" "destructive")
+    else
+      warn "Could not identify a standalone script path. If you used curl | bash, there is no downloaded script file to remove."
+    fi
+  elif [[ -n "$repo_root" ]] && ! repo_looks_like_this_project "$repo_root" && [[ -n "$script_path" ]]; then
     cleanup_options+=("script" "$script_path" "delete this downloaded script file" "destructive")
-  else
-    warn "Could not identify a standalone script path. If you used curl | bash, there is no downloaded script file to remove."
   fi
 
   if ! choose_checklist selections "Select script traces to remove" --delete "${cleanup_options[@]}"; then
@@ -2989,13 +3153,19 @@ cleanup_script_traces() {
 }
 
 operator_report() {
-  local report="/tmp/tor-relay-report.$(date -u '+%Y%m%dT%H%M%SZ').txt"
+  local report=""
   local local_fp=""
   local current_orport=""
 
   section "Operator Report"
+  if ((DRY_RUN)); then
+    info "Would write a root-readable operator report with service, torrc, and recent warning context."
+    return 0
+  fi
+
   local_fp=$(local_relay_fingerprint || true)
   current_orport=$(read_torrc_first_orport || true)
+  report=$(umask 077 && mktemp /tmp/tor-relay-report.XXXXXX.txt)
 
   {
     printf 'Tor Relay Operator Report\n'
@@ -3218,9 +3388,13 @@ show_summary() {
   printf '%bContactInfo%b: %s\n' "$BOLD" "$RESET" "$CONTACT_INFO"
   if ((ENABLE_IPV6)); then
     printf '%bIPv6 ORPort%b: [%s]:%s\n' "$BOLD" "$RESET" "$IPV6_ADDRESS" "$OR_PORT"
+    if ((IPV6_MANUAL_OVERRIDE)); then
+      printf '%bIPv6 verification%b: manual override; post-start status will be reported as unverified until Tor confirms reachability\n' "$BOLD" "$RESET"
+    fi
   else
     printf '%bIPv6 ORPort%b: disabled\n' "$BOLD" "$RESET"
   fi
+  printf '%bInitial MyFamily manager%b: %s\n' "$BOLD" "$RESET" "$([[ $INITIAL_MYFAMILY_AFTER_SETUP -eq 1 ]] && printf yes || printf no)"
   if ((CONFIGURE_RELAY_BANDWIDTH)); then
     printf '%bBandwidth%b: %s %s/s average, %s %s/s burst\n' "$BOLD" "$RESET" "$RELAY_BANDWIDTH_RATE_VALUE" "$RELAY_BANDWIDTH_RATE_UNIT" "$RELAY_BANDWIDTH_BURST_VALUE" "$RELAY_BANDWIDTH_BURST_UNIT"
     if [[ "$BANDWIDTH_MODE" == "steady" ]]; then
@@ -3239,12 +3413,13 @@ show_summary() {
   fi
   printf '%bAutomatic updates%b: %s\n' "$BOLD" "$RESET" "$([[ $ENABLE_AUTO_UPDATES -eq 1 ]] && printf yes || printf no)"
   printf '%bInstall Nyx%b: %s\n' "$BOLD" "$RESET" "$([[ $INSTALL_NYX -eq 1 ]] && printf yes || printf no)"
+  printf '%bInstall fzf%b: %s\n' "$BOLD" "$RESET" "$([[ $INSTALL_FZF -eq 1 ]] && printf yes || printf no)"
   printf '%bFirewall change%b: %s (%s)\n' "$BOLD" "$RESET" "$([[ $ENABLE_FIREWALL -eq 1 ]] && printf yes || printf no)" "$FIREWALL_KIND"
   if ((INSTALL_UFW)); then
     printf '%bInstall UFW%b: yes\n' "$BOLD" "$RESET"
   fi
   if ((ENABLE_UFW_AFTER_RULES)); then
-    printf '%bEnable UFW%b: yes, after allowing SSH TCP %s and ORPort TCP %s\n' "$BOLD" "$RESET" "$SSH_PORT_FOR_UFW" "$OR_PORT"
+    printf '%bEnable UFW%b: yes, after allowing SSH TCP %s and ORPort TCP %s\n' "$BOLD" "$RESET" "$SSH_PORTS_FOR_UFW" "$OR_PORT"
   fi
   printf '%bTor Sandbox%b: %s\n' "$BOLD" "$RESET" "$([[ $ENABLE_TOR_SANDBOX -eq 1 ]] && printf yes || printf no)"
 
@@ -3263,6 +3438,9 @@ show_summary() {
   if ((INSTALL_NYX)); then
     printf '  - Install nyx for terminal relay monitoring.\n'
   fi
+  if ((INSTALL_FZF)); then
+    printf '  - Install fzf for searchable selector menus on future runs.\n'
+  fi
   if [[ "$RELAY_MODE" == "exit" && "$CONFIGURE_UNBOUND" -eq 1 ]]; then
     printf '  - Install Unbound and switch %s to the local resolver.\n' "$RESOLV_CONF_PATH"
     if ((LOCK_RESOLV_CONF)); then
@@ -3278,7 +3456,7 @@ show_summary() {
       printf '  - Install ufw.\n'
     fi
     if [[ "$FIREWALL_KIND" == "ufw" ]]; then
-      printf '  - Allow SSH TCP %s and Tor ORPort TCP %s using ufw.\n' "$SSH_PORT_FOR_UFW" "$OR_PORT"
+      printf '  - Allow SSH TCP %s and Tor ORPort TCP %s using ufw.\n' "$SSH_PORTS_FOR_UFW" "$OR_PORT"
       if ((ENABLE_UFW_AFTER_RULES)); then
         printf '  - Enable ufw after SSH and ORPort rules are present.\n'
       fi
@@ -3316,6 +3494,7 @@ configure_tor_repository() {
     print_command gpg --dearmor --output "$TOR_KEYRING_PATH"
   else
     wget -qO "$ascii_key" "${TOR_APT_BASE_URL}/A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89.asc"
+    verify_tor_signing_key_file "$ascii_key"
     gpg --dearmor --yes --output "$binary_key" "$ascii_key"
   fi
 
@@ -3330,8 +3509,18 @@ configure_tor_repository() {
 install_tor_package() {
   run "Updating apt package lists" env DEBIAN_FRONTEND=noninteractive apt-get update
 
+  if ((DRY_RUN)); then
+    info "Would verify apt candidate for tor comes from ${TOR_APT_BASE_URL}."
+    info "Would install tor and deb.torproject.org-keyring when available."
+    return 0
+  fi
+
   if ! apt_package_available tor; then
     die "The tor package is not available from apt after adding the Tor Project repository."
+  fi
+
+  if ! tor_candidate_from_tor_project; then
+    die "The selected apt candidate for tor does not appear to come from ${TOR_APT_BASE_URL}. Check apt-cache policy tor before continuing."
   fi
 
   run "Installing Tor from apt" env DEBIAN_FRONTEND=noninteractive apt-get install -y tor
@@ -3351,15 +3540,48 @@ install_nyx_package() {
   run "Installing Nyx relay monitor" env DEBIAN_FRONTEND=noninteractive apt-get install -y nyx
 }
 
+install_fzf_package() {
+  local fzf_was_installed=0
+
+  ((INSTALL_FZF)) || return 0
+  if apt_package_installed fzf; then
+    fzf_was_installed=1
+  fi
+
+  run "Installing fzf searchable selector" env DEBIAN_FRONTEND=noninteractive apt-get install -y fzf
+  if ((DRY_RUN)); then
+    info "Would record that this script installed fzf."
+  elif command_exists fzf && ((fzf_was_installed == 0)); then
+    mark_script_installed_fzf
+    if ! ((PLAIN_TUI)); then
+      USE_FZF=1
+    fi
+  elif command_exists fzf; then
+    success "fzf is installed; not marking it as script-installed because it was already present."
+  fi
+}
+
 configure_exit_dns() {
   local resolv_file="$TMP_DIR/resolv.conf"
-  local resolv_backup="${RESOLV_CONF_PATH}.bak.${TIMESTAMP}"
+  local resolv_backup=""
 
   [[ "$RELAY_MODE" == "exit" && "$CONFIGURE_UNBOUND" -eq 1 ]] || return 0
 
   build_resolv_conf "$resolv_file"
 
+  if command_exists lsattr && lsattr -d "$RESOLV_CONF_PATH" 2>/dev/null | awk '{ print $1 }' | grep -q 'i'; then
+    die "${RESOLV_CONF_PATH} is immutable. Unlock it first with: chattr -i ${RESOLV_CONF_PATH}"
+  fi
+
+  if [[ -L "$RESOLV_CONF_PATH" ]] && command_exists systemctl && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    warn "${RESOLV_CONF_PATH} is managed through a symlink while systemd-resolved is active."
+    warn "This script will replace it only because exit relay DNS needs a local caching resolver."
+  fi
+
   run "Installing Unbound local resolver" env DEBIAN_FRONTEND=noninteractive apt-get install -y unbound
+  if command_exists unbound-checkconf; then
+    run "Checking Unbound configuration" unbound-checkconf
+  fi
   run "Enabling and starting Unbound" systemctl enable --now unbound
 
   if ((DRY_RUN)); then
@@ -3373,18 +3595,15 @@ configure_exit_dns() {
     die "Unbound is not active. Check: journalctl -u unbound -n 100 --no-pager"
   fi
 
-  backup_file "$RESOLV_CONF_PATH"
-  if [[ -L "$RESOLV_CONF_PATH" ]]; then
-    unlink "$RESOLV_CONF_PATH"
-  fi
-  install -m 0644 "$resolv_file" "$RESOLV_CONF_PATH"
+  install_file_if_changed "$resolv_file" "$RESOLV_CONF_PATH" "0644"
+  resolv_backup=$LAST_BACKUP_PATH
   success "Configured ${RESOLV_CONF_PATH} to use local Unbound."
 
   if getent hosts deb.torproject.org >/dev/null 2>&1; then
     success "DNS resolution works through local resolver."
   else
     warn "DNS resolution failed after switching to local Unbound."
-    if [[ -e "$resolv_backup" || -L "$resolv_backup" ]]; then
+    if [[ -n "$resolv_backup" && ( -e "$resolv_backup" || -L "$resolv_backup" ) ]]; then
       rm -f -- "$RESOLV_CONF_PATH"
       cp -a -- "$resolv_backup" "$RESOLV_CONF_PATH"
       warn "Restored ${RESOLV_CONF_PATH} from ${resolv_backup}."
@@ -3418,6 +3637,7 @@ configure_unattended_upgrades() {
 configure_torrc() {
   local torrc_file="$TMP_DIR/torrc"
   build_torrc "$torrc_file"
+  verify_tor_config_file "$torrc_file"
   install_file_if_changed "$torrc_file" "$TORRC_PATH" "0644"
 }
 
@@ -3438,6 +3658,8 @@ nft_rule_exists() {
 }
 
 configure_ufw_firewall() {
+  local ssh_port
+
   if ((INSTALL_UFW)); then
     run "Updating apt package lists before installing UFW" env DEBIAN_FRONTEND=noninteractive apt-get update
     run "Installing UFW" env DEBIAN_FRONTEND=noninteractive apt-get install -y ufw
@@ -3445,7 +3667,9 @@ configure_ufw_firewall() {
 
   ((DRY_RUN)) || command_exists ufw || die "ufw is not installed."
 
-  run "Allowing SSH TCP ${SSH_PORT_FOR_UFW} through UFW" ufw allow "${SSH_PORT_FOR_UFW}/tcp" comment "SSH"
+  for ssh_port in $SSH_PORTS_FOR_UFW; do
+    run "Allowing SSH TCP ${ssh_port} through UFW" ufw allow "${ssh_port}/tcp" comment "SSH"
+  done
   run "Allowing TCP ${OR_PORT} through UFW" ufw allow "${OR_PORT}/tcp" comment "Tor relay ORPort"
 
   if ((ENABLE_UFW_AFTER_RULES)); then
@@ -3491,12 +3715,18 @@ configure_firewall() {
   esac
 }
 
-verify_tor_config() {
+verify_tor_config_file() {
+  local config_file=$1
+
   if command_exists tor; then
-    run "Verifying Tor configuration syntax" tor --verify-config -f "$TORRC_PATH"
+    run "Verifying Tor configuration syntax" tor --verify-config -f "$config_file"
   else
     warn "tor command not found yet; cannot verify torrc syntax."
   fi
+}
+
+verify_tor_config() {
+  verify_tor_config_file "$TORRC_PATH"
 }
 
 check_tor_orport_self_test() {
@@ -3504,13 +3734,15 @@ check_tor_orport_self_test() {
   local log_output
   local since_time
   local wait_seconds
+  local require_success
 
   since_time=${1:-"5 minutes ago"}
   wait_seconds=${2:-90}
+  require_success=${3:-0}
 
   command_exists journalctl || {
     warn "journalctl not found; skipped Tor ORPort self-test log check."
-    return 0
+    return "$require_success"
   }
 
   if ((wait_seconds > 0)); then
@@ -3531,7 +3763,7 @@ check_tor_orport_self_test() {
     if grep -Fq "Your server has not managed to confirm that its ORPort is reachable" <<< "$log_output"; then
       warn "Tor has not confirmed external ORPort reachability yet."
       warn "Check local/cloud firewall rules for TCP ${OR_PORT}, then watch: journalctl -u ${TOR_SERVICE} -f"
-      return 0
+      return "$require_success"
     fi
 
     ((wait_seconds > 0 && SECONDS < deadline)) || break
@@ -3544,6 +3776,7 @@ check_tor_orport_self_test() {
   else
     warn "No recent ORPort self-test result was found in the selected log window."
   fi
+  return "$require_success"
 }
 
 restart_and_verify_tor() {
@@ -3576,7 +3809,25 @@ restart_and_verify_tor() {
     warn "ss command not found; skipped listener verification."
   fi
 
-  check_tor_orport_self_test "$restart_since"
+  if check_tor_orport_self_test "$restart_since" 90 1; then
+    success "Final verification reached Tor's ORPort self-test success signal."
+  else
+    warn "Setup applied, but Tor's external ORPort reachability is not verified yet."
+    warn "This is usually firewall, provider firewall, IPv6, NAT, or descriptor timing. The relay may not be usable until Tor confirms reachability."
+  fi
+
+  if ((ENABLE_IPV6)); then
+    if command_exists ss; then
+      if ss -H -ltn | awk '{ print $4 }' | grep -Fq "[${IPV6_ADDRESS}]:${OR_PORT}"; then
+        success "Tor appears to be listening on IPv6 [${IPV6_ADDRESS}]:${OR_PORT}."
+      else
+        warn "Could not confirm a listener on IPv6 [${IPV6_ADDRESS}]:${OR_PORT}."
+      fi
+    fi
+    if ((IPV6_MANUAL_OVERRIDE)); then
+      warn "IPv6 ORPort was kept by manual override. Treat IPv6 as unverified until Relay Search shows the IPv6 OR address."
+    fi
+  fi
 }
 
 apply_changes() {
@@ -3589,6 +3840,7 @@ apply_changes() {
   configure_tor_repository
   install_tor_package
   install_nyx_package
+  install_fzf_package
   configure_exit_dns
 
   if ((ENABLE_AUTO_UPDATES)); then
@@ -3647,14 +3899,15 @@ main() {
   TMP_DIR=$(mktemp -d)
 
   banner
-  require_supported_system
-  if ((DECOMMISSION_MODE)); then
-    if command_exists fzf; then
+  if ((CLEANUP_MODE)); then
+    if ! ((PLAIN_TUI)) && command_exists fzf; then
       USE_FZF=1
     fi
     cleanup_script_traces
     exit 0
   fi
+  require_supported_system
+  acquire_run_lock
   bootstrap_tui
   if existing_relay_menu; then
     exit 0
@@ -3664,12 +3917,18 @@ main() {
   collect_relay_identity
   collect_ipv6
   collect_exit_options
+  collect_initial_myfamily
   collect_bandwidth
   collect_maintenance_options
   show_summary
   confirm_apply
   apply_changes
+  if ((INITIAL_MYFAMILY_AFTER_SETUP)); then
+    manage_myfamily
+  fi
   print_next_steps
 }
 
-main "$@"
+if [[ "${TOR_RELAY_SETUP_SOURCE_ONLY:-0}" != "1" ]]; then
+  main "$@"
+fi

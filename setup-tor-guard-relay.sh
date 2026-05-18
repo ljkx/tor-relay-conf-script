@@ -7,9 +7,9 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.4.0"
+VERSION="1.4.1"
 DRY_RUN=0
-USE_WHIPTAIL=0
+USE_FZF=0
 PLAIN_TUI=0
 
 TMP_DIR=""
@@ -19,6 +19,7 @@ STEP_NUMBER=0
 CURRENT_STEP_LABEL=""
 CURRENT_STEP_TITLE=""
 SELECTED_RELAY_FINGERPRINT=""
+SELECTED_RELAY_FINGERPRINTS=()
 
 OS_ID=""
 OS_VERSION_ID=""
@@ -140,7 +141,7 @@ Usage:
 Options:
   --dry-run   Prompt normally and print the system changes that would be made,
               without installing packages or writing system files.
-  --plain     Use the built-in line interface instead of the whiptail TUI.
+  --plain     Use the built-in line interface instead of the fzf selectors.
   --help      Show this help text and exit.
   --version   Show the script version and exit.
 
@@ -184,7 +185,7 @@ parse_args() {
 banner() {
   printf '\n%bTor Relay Setup%b %s\n' "$BOLD$CYAN" "$RESET" "$VERSION"
   printf '%s\n' "Guided installer for public Guard/middle and exit relays."
-  printf '%s\n\n' "It may install whiptail for the UI; relay changes are reviewed before apply."
+  printf '%s\n\n' "It may install fzf for polished selectors; relay changes are reviewed before apply."
 }
 
 section() {
@@ -233,16 +234,12 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
-tui_available() {
-  ((USE_WHIPTAIL)) && command_exists whiptail && [[ -e /dev/tty && -r /dev/tty ]]
+fzf_available() {
+  ((USE_FZF)) && command_exists fzf && [[ -e /dev/tty && -r /dev/tty ]]
 }
 
-dialog_title() {
-  if [[ -n "${CURRENT_STEP_LABEL:-}" && -n "${CURRENT_STEP_TITLE:-}" ]]; then
-    printf '%s [%s] %s' "$SCRIPT_NAME" "$CURRENT_STEP_LABEL" "$CURRENT_STEP_TITLE"
-  else
-    printf '%s %s' "$SCRIPT_NAME" "$VERSION"
-  fi
+tui_available() {
+  fzf_available
 }
 
 bootstrap_tui() {
@@ -251,15 +248,15 @@ bootstrap_tui() {
     return 0
   }
 
-  if command_exists whiptail; then
-    USE_WHIPTAIL=1
-    success "TUI mode enabled with whiptail."
+  if command_exists fzf; then
+    USE_FZF=1
+    success "Polished selector mode enabled with fzf."
     return 0
   fi
 
   if ((DRY_RUN)); then
-    warn "whiptail is not installed. Dry run will use the built-in line interface."
-    info "Would install whiptail for the full TUI during a real run."
+    warn "fzf is not installed. Dry run will use the built-in line interface."
+    info "Would install fzf for polished selectors during a real run."
     return 0
   fi
 
@@ -269,14 +266,14 @@ bootstrap_tui() {
     check_path_capacity /var 512000 2048
   }
 
-  info "Installing whiptail for the interactive TUI."
+  info "Installing fzf for searchable selectors."
   if env DEBIAN_FRONTEND=noninteractive apt-get update \
-    && env DEBIAN_FRONTEND=noninteractive apt-get install -y whiptail \
-    && command_exists whiptail; then
-    USE_WHIPTAIL=1
-    success "TUI mode enabled with whiptail."
+    && env DEBIAN_FRONTEND=noninteractive apt-get install -y fzf \
+    && command_exists fzf; then
+    USE_FZF=1
+    success "Polished selector mode enabled with fzf."
   else
-    warn "Could not install whiptail. Falling back to the built-in line interface."
+    warn "Could not install fzf. Falling back to the built-in line interface."
   fi
 }
 
@@ -420,21 +417,6 @@ prompt_line() {
   local default_value=${2:-}
   local reply
 
-  if tui_available; then
-    if ! reply=$(whiptail \
-      --title "$(dialog_title)" \
-      --inputbox "$prompt" 10 76 "$default_value" \
-      3>&1 1>&2 2>&3 < /dev/tty); then
-      die "Cancelled by user."
-    fi
-    reply=$(sanitize_reply "$reply")
-    if [[ -z "$reply" && -n "$default_value" ]]; then
-      reply=$default_value
-    fi
-    trim "$reply"
-    return 0
-  fi
-
   prompt_step_prefix
   if [[ -n "$default_value" ]]; then
     prompt_printf '%b%s%b [%s]: ' "$BOLD" "$prompt" "$RESET" "$default_value"
@@ -480,17 +462,6 @@ ask_yes_no() {
   local suffix
   local reply
 
-  if tui_available; then
-    local whiptail_args=(--title "$(dialog_title)")
-    if [[ "$default_answer" == "no" ]]; then
-      whiptail_args+=(--defaultno)
-    fi
-    if whiptail "${whiptail_args[@]}" --yesno "$prompt" 10 76 < /dev/tty; then
-      return 0
-    fi
-    return 1
-  fi
-
   case "$default_answer" in
     yes) suffix="[Y/n]" ;;
     no) suffix="[y/N]" ;;
@@ -517,6 +488,50 @@ ask_yes_no() {
   done
 }
 
+mktemp_in_workspace() {
+  if [[ -n "${TMP_DIR:-}" && -d "${TMP_DIR:-}" ]]; then
+    mktemp "${TMP_DIR%/}/fzf.XXXXXX"
+  else
+    mktemp
+  fi
+}
+
+choose_with_fzf() {
+  local output_file=$1
+  local title=$2
+  local mode=$3
+  local input_file=$4
+  local expect_keys=${5:-}
+  local prompt_label="${title}> "
+  local -a args=(
+    --height=80%
+    --reverse
+    --border
+    --delimiter=$'\t'
+    --with-nth=1,2
+    --prompt="$prompt_label"
+    --preview='printf "%s\n\n%s\n\n%s\n" {2} {3} {4}'
+    --preview-window=down:6:wrap
+  )
+
+  case "$mode" in
+    multi)
+      args+=(--multi --bind=space:toggle,d:accept --header="Space toggles. Press d or Enter to accept; Esc cancels.")
+      ;;
+    single)
+      args+=(--header="Type to filter. Enter selects; Esc cancels.")
+      if [[ -n "$expect_keys" ]]; then
+        args+=(--expect="$expect_keys")
+      fi
+      ;;
+    *)
+      die "Unknown fzf mode: ${mode}"
+      ;;
+  esac
+
+  FZF_DEFAULT_OPTS= fzf "${args[@]}" < "$input_file" > "$output_file"
+}
+
 choose_menu() {
   local result_name=$1
   local title=$2
@@ -524,29 +539,53 @@ choose_menu() {
   shift 3
   local -n result_ref=$result_name
   local -a options=("$@")
-  local -a whiptail_options=()
+  local -a fzf_lines=()
   local menu_reply
+  local expect_keys=""
+  local key_pressed=0
   local key
   local label
   local description
   local i
 
   if tui_available; then
+    local list_file
+    local output_file
+    list_file=$(mktemp_in_workspace)
+    output_file=$(mktemp_in_workspace)
+
     for ((i = 0; i < ${#options[@]}; i += 3)); do
       key=${options[i]}
       label=${options[i + 1]}
       description=${options[i + 2]}
-      whiptail_options+=("$key" "${label}${description:+ - ${description}}")
+      printf '%s\t%s\t%s\t%s\n' "$key" "$label" "${description:-}" "Current default: ${default_choice}" >> "$list_file"
+      if [[ "$key" =~ ^[[:alnum:]]$ ]]; then
+        if [[ -n "$expect_keys" ]]; then
+          expect_keys+=","
+        fi
+        expect_keys+="$key"
+      fi
     done
 
-    if ! menu_reply=$(whiptail \
-      --title "$(dialog_title)" \
-      --default-item "$default_choice" \
-      --menu "$title" 20 78 10 \
-      "${whiptail_options[@]}" \
-      3>&1 1>&2 2>&3 < /dev/tty); then
+    if ! choose_with_fzf "$output_file" "$title" single "$list_file" "$expect_keys"; then
       die "Cancelled by user."
     fi
+    mapfile -t fzf_lines < "$output_file"
+    menu_reply=${fzf_lines[0]:-}
+    if [[ "$menu_reply" != *$'\t'* ]]; then
+      key_pressed=0
+      for ((i = 0; i < ${#options[@]}; i += 3)); do
+        if [[ "$menu_reply" == "${options[i]}" ]]; then
+          key_pressed=1
+          break
+        fi
+      done
+      if ((key_pressed == 0)) && ((${#fzf_lines[@]} > 1)); then
+        menu_reply=${fzf_lines[1]}
+      fi
+    fi
+    menu_reply=${menu_reply%%$'\t'*}
+    rm -f -- "$list_file" "$output_file"
     result_ref=$menu_reply
     return 0
   fi
@@ -576,6 +615,70 @@ choose_menu() {
     done
     warn "Choose one of the listed actions."
   done
+}
+
+choose_checklist() {
+  local result_name=$1
+  local title=$2
+  shift 2
+  local -n result_ref=$result_name
+  local -a options=("$@")
+  local key
+  local label
+  local description
+  local status
+  local line
+  local i
+
+  result_ref=()
+
+  if tui_available; then
+    local list_file
+    local output_file
+    list_file=$(mktemp_in_workspace)
+    output_file=$(mktemp_in_workspace)
+
+    for ((i = 0; i < ${#options[@]}; i += 4)); do
+      key=${options[i]}
+      label=${options[i + 1]}
+      description=${options[i + 2]}
+      status=${options[i + 3]}
+      printf '%s\t%s\t%s\t%s\n' "$key" "$label" "$description" "$status" >> "$list_file"
+    done
+
+    if ! choose_with_fzf "$output_file" "$title" multi "$list_file"; then
+      rm -f -- "$list_file" "$output_file"
+      return 1
+    fi
+
+    while IFS= read -r line; do
+      [[ -n "$line" ]] || continue
+      result_ref+=("${line%%$'\t'*}")
+    done < "$output_file"
+    rm -f -- "$list_file" "$output_file"
+    ((${#result_ref[@]} > 0))
+    return $?
+  fi
+
+  step_prefix >&2
+  printf '%b%s%b\n' "$BOLD" "$title" "$RESET" >&2
+  for ((i = 0; i < ${#options[@]}; i += 4)); do
+    key=${options[i]}
+    label=${options[i + 1]}
+    description=${options[i + 2]}
+    step_prefix >&2
+    printf '  %-4s %s' "$key)" "$label" >&2
+    if [[ -n "$description" ]]; then
+      printf ' - %s' "$description" >&2
+    fi
+    printf '\n' >&2
+  done
+
+  line=$(prompt_line "Choose one or more numbers separated by spaces (blank to cancel)")
+  [[ -n "$line" ]] || return 1
+  line=${line//,/ }
+  # shellcheck disable=SC2206
+  result_ref=($line)
 }
 
 valid_integer() {
@@ -1751,6 +1854,7 @@ select_relay_fingerprint() {
   local candidates_file="$TMP_DIR/onionoo-candidates.tsv"
   local selection_hint=""
   local selection
+  local -a selections=()
   local row_count=0
   local index
   local fingerprint
@@ -1759,6 +1863,7 @@ select_relay_fingerprint() {
   local addresses
 
   SELECTED_RELAY_FINGERPRINT=""
+  SELECTED_RELAY_FINGERPRINTS=()
 
   if [[ "$query" =~ ^(.+)[[:space:]]+#?([0-9]+)$ ]]; then
     query=$(trim "${BASH_REMATCH[1]}")
@@ -1773,41 +1878,63 @@ select_relay_fingerprint() {
     return 1
   fi
 
-  printf '\n'
-  step_prefix
-  printf '%s\n' "Relay candidates:"
-  while IFS=$'\t' read -r index fingerprint nickname running addresses; do
-    step_prefix
-    printf '  %s) %s  %s  running:%s  %s\n' "$index" "$nickname" "$fingerprint" "$running" "${addresses:-no addresses shown}"
-  done < "$candidates_file"
-
   if [[ -n "$selection_hint" ]]; then
-    selection=$selection_hint
-  else
+    selections=("$selection_hint")
+  elif tui_available; then
     local -a candidate_options=()
+    local default_status
     while IFS=$'\t' read -r index fingerprint nickname running addresses; do
-      candidate_options+=("$index" "$nickname" "${fingerprint} running:${running} ${addresses:-no addresses shown}")
+      default_status="OFF"
+      if ((row_count == 1)); then
+        default_status="ON"
+      fi
+      candidate_options+=(
+        "$index"
+        "$fingerprint"
+        "nickname:${nickname}  running:${running}  ${addresses:-no addresses shown}"
+        "$default_status"
+      )
     done < "$candidates_file"
-    choose_menu selection "Select the exact relay to add to MyFamily" "1" "${candidate_options[@]}"
+    if ! choose_checklist selections "Select relay fingerprint(s) to add" "${candidate_options[@]}"; then
+      warn "No relay candidate was selected."
+      return 1
+    fi
+  else
+    printf '\n'
+    step_prefix
+    printf '%s\n' "Relay candidates:"
+    while IFS=$'\t' read -r index fingerprint nickname running addresses; do
+      step_prefix
+      printf '  %s) %s  %s  running:%s  %s\n' "$index" "$nickname" "$fingerprint" "$running" "${addresses:-no addresses shown}"
+    done < "$candidates_file"
+    selection=$(prompt_line "Select the correct relay number, or blank to skip")
+    [[ -n "$selection" ]] || return 1
+    selections=("$selection")
   fi
 
-  [[ -n "$selection" ]] || return 1
-  if ! valid_integer "$selection" || ((10#$selection < 1 || 10#$selection > row_count)); then
-    warn "Invalid relay selection: ${selection}"
-    return 1
-  fi
+  for selection in "${selections[@]}"; do
+    if ! valid_integer "$selection" || ((10#$selection < 1 || 10#$selection > row_count)); then
+      warn "Invalid relay selection: ${selection}"
+      continue
+    fi
 
-  fingerprint=$(awk -F '\t' -v wanted="$selection" '$1 == wanted { print $2; exit }' "$candidates_file")
-  nickname=$(awk -F '\t' -v wanted="$selection" '$1 == wanted { print $3; exit }' "$candidates_file")
-  running=$(awk -F '\t' -v wanted="$selection" '$1 == wanted { print $4; exit }' "$candidates_file")
-  step_prefix
-  printf 'Selected: %s  %s  running:%s\n' "$nickname" "$fingerprint" "$running"
+    fingerprint=$(awk -F '\t' -v wanted="$selection" '$1 == wanted { print $2; exit }' "$candidates_file")
+    nickname=$(awk -F '\t' -v wanted="$selection" '$1 == wanted { print $3; exit }' "$candidates_file")
+    running=$(awk -F '\t' -v wanted="$selection" '$1 == wanted { print $4; exit }' "$candidates_file")
+    step_prefix
+    printf 'Selected: %s  %s  running:%s\n' "$nickname" "$fingerprint" "$running"
+    SELECTED_RELAY_FINGERPRINTS+=("$fingerprint")
+  done
 
-  if ask_yes_no "Add this fingerprint to MyFamily?" "yes"; then
-    SELECTED_RELAY_FINGERPRINT=$fingerprint
+  ((${#SELECTED_RELAY_FINGERPRINTS[@]})) || return 1
+
+  if ask_yes_no "Add selected fingerprint(s) to MyFamily?" "yes"; then
+    SELECTED_RELAY_FINGERPRINT=${SELECTED_RELAY_FINGERPRINTS[0]}
     return 0
   fi
 
+  SELECTED_RELAY_FINGERPRINT=""
+  SELECTED_RELAY_FINGERPRINTS=()
   return 1
 }
 
@@ -1919,17 +2046,23 @@ add_myfamily_member() {
   local -n family_array=$array_name
   local entry
   local resolved_fp
+  local added_count=0
 
   entry=$(prompt_line "Relay nickname or 40-char fingerprint to add")
   [[ -n "$entry" ]] || return 0
 
   if select_relay_fingerprint "$entry"; then
-    resolved_fp=$SELECTED_RELAY_FINGERPRINT
-    if fingerprint_in_array "$resolved_fp" "${family_array[@]}"; then
-      success "${resolved_fp} is already in MyFamily."
-    else
-      append_unique_fingerprint "$array_name" "$resolved_fp"
-      success "Added ${resolved_fp}."
+    for resolved_fp in "${SELECTED_RELAY_FINGERPRINTS[@]}"; do
+      if fingerprint_in_array "$resolved_fp" "${family_array[@]}"; then
+        success "${resolved_fp} is already in MyFamily."
+      else
+        append_unique_fingerprint "$array_name" "$resolved_fp"
+        success "Added ${resolved_fp}."
+        added_count=$((added_count + 1))
+      fi
+    done
+    if ((added_count > 1)); then
+      success "Added ${added_count} fingerprints."
     fi
   else
     warn "No fingerprint was added for '${entry}'."
@@ -1941,46 +2074,66 @@ remove_myfamily_member() {
   local -n family_array=$array_name
   local local_fp=$2
   local selection
+  local -a selections=()
+  local -a selected_for_removal=()
+  local -a remove_options=()
   local index
   local removed
+  local removed_count=0
 
   if ((${#family_array[@]} == 0)); then
     warn "There are no fingerprints to remove."
     return 0
   fi
 
-  if tui_available; then
-    local -a remove_options=()
-    for ((index = 0; index < ${#family_array[@]}; index++)); do
+  for ((index = 0; index < ${#family_array[@]}; index++)); do
+    removed=${family_array[$index]}
+    if [[ -n "$local_fp" && "$removed" == "$local_fp" ]]; then
+      remove_options+=("$((index + 1))" "$removed" "this relay; pinned and protected" "PINNED")
+    else
+      remove_options+=("$((index + 1))" "$removed" "configured MyFamily member" "removable")
+    fi
+  done
+
+  if ! choose_checklist selections "MyFamily fingerprints: Space selects, d deletes" "${remove_options[@]}"; then
+    warn "No fingerprints selected for deletion."
+    return 0
+  fi
+
+  for selection in "${selections[@]}"; do
+    if ! valid_integer "$selection" || ((10#$selection < 1 || 10#$selection > ${#family_array[@]})); then
+      warn "Invalid MyFamily selection: ${selection}"
+      continue
+    fi
+
+    index=$((10#$selection - 1))
+    removed=${family_array[$index]}
+    if [[ -n "$local_fp" && "$removed" == "$local_fp" ]]; then
+      warn "The local relay fingerprint is pinned and will stay in MyFamily."
+      continue
+    fi
+    selected_for_removal+=("$index")
+  done
+
+  ((${#selected_for_removal[@]})) || return 0
+
+  if ! ask_yes_no "Delete ${#selected_for_removal[@]} selected fingerprint(s) from MyFamily?" "no"; then
+    warn "No MyFamily fingerprints were deleted."
+    return 0
+  fi
+
+  for index in "${selected_for_removal[@]}"; do
+    if [[ -n "${family_array[$index]+set}" ]]; then
       removed=${family_array[$index]}
-      if [[ -n "$local_fp" && "$removed" == "$local_fp" ]]; then
-        remove_options+=("$((index + 1))" "$removed" "this relay, pinned")
-      else
-        remove_options+=("$((index + 1))" "$removed" "remove from MyFamily")
-      fi
-    done
-    choose_menu selection "Select a fingerprint to remove" "1" "${remove_options[@]}"
-  else
-    print_myfamily_editor_list "$array_name" "$local_fp"
-    selection=$(prompt_line "Fingerprint number to remove (blank to cancel)")
-  fi
-  [[ -n "$selection" ]] || return 0
-
-  if ! valid_integer "$selection" || ((10#$selection < 1 || 10#$selection > ${#family_array[@]})); then
-    warn "Choose a number from the list."
-    return 0
-  fi
-
-  index=$((10#$selection - 1))
-  removed=${family_array[$index]}
-  if [[ -n "$local_fp" && "$removed" == "$local_fp" ]]; then
-    warn "The local relay fingerprint is pinned and will stay in MyFamily."
-    return 0
-  fi
-
-  unset 'family_array[index]'
+      unset 'family_array[index]'
+      success "Removed ${removed}."
+      removed_count=$((removed_count + 1))
+    fi
+  done
   family_array=("${family_array[@]}")
-  success "Removed ${removed}."
+  if ((removed_count > 1)); then
+    success "Removed ${removed_count} fingerprints."
+  fi
 }
 
 save_myfamily_changes() {
@@ -2062,10 +2215,12 @@ manage_myfamily() {
   fi
 
   while true; do
-    print_myfamily_editor_list family_fingerprints "$local_fp"
-    choose_menu choice "MyFamily editor actions" "a" \
-      "a" "Add relay" "Nickname or 40-char fingerprint" \
-      "r" "Remove relay" "Delete by list number" \
+    if ! tui_available; then
+      print_myfamily_editor_list family_fingerprints "$local_fp"
+    fi
+    choose_menu choice "MyFamily editor: ${#family_fingerprints[@]} fingerprint(s)" "a" \
+      "a" "Add relay(s)" "Nickname lookup or 40-char fingerprint" \
+      "d" "Delete selected" "Search list, Space marks rows, d accepts deletion" \
       "c" "Check published status" "Query Tor Metrics Onionoo" \
       "s" "Save and apply" "Write torrc and optionally restart Tor" \
       "q" "Discard and go back" "Leave torrc unchanged"
@@ -2074,7 +2229,7 @@ manage_myfamily() {
       a)
         add_myfamily_member family_fingerprints
         ;;
-      r)
+      d)
         remove_myfamily_member family_fingerprints "$local_fp"
         ;;
       c)
@@ -2676,7 +2831,7 @@ print_next_steps() {
   printf '\n%s\n' "Remember:"
   printf '  - Keep inbound TCP %s open in any VPS provider/cloud firewall.\n' "$OR_PORT"
   printf '  - New relays ramp up gradually; Guard usage can take time and stable uptime.\n'
-  printf '  - If you run multiple relays, configure MyFamily manually after you know their fingerprints.\n'
+  printf '  - If you run multiple relays, use the existing relay tools to keep MyFamily synced.\n'
   printf '  - Consider backing up /var/lib/tor/keys after the relay is running.\n'
   if [[ "$RELAY_MODE" == "exit" ]]; then
     printf '  - Keep provider, reverse DNS/WHOIS, and abuse-contact handling aligned with exit operation.\n'

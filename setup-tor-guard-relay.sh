@@ -7,7 +7,7 @@ case "$SCRIPT_NAME" in
     SCRIPT_NAME="setup-tor-guard-relay.sh"
     ;;
 esac
-VERSION="1.2.0"
+VERSION="1.2.1"
 DRY_RUN=0
 
 TMP_DIR=""
@@ -333,6 +333,16 @@ trim() {
   printf '%s' "$value"
 }
 
+sanitize_reply() {
+  local value=$1
+
+  value=${value//$'\e[200~'/}
+  value=${value//$'\e[201~'/}
+  value=$(printf '%s' "$value" | sed -E $'s/\x1B\\[[0-9;?]*[ -/]*[@-~]//g')
+  value=$(printf '%s' "$value" | tr -d '\000-\010\013\014\016-\037\177')
+  printf '%s' "$value"
+}
+
 prompt_line() {
   local prompt=$1
   local default_value=${2:-}
@@ -346,6 +356,7 @@ prompt_line() {
   fi
 
   read_reply reply
+  reply=$(sanitize_reply "$reply")
   if [[ -z "$reply" && -n "$default_value" ]]; then
     reply=$default_value
   fi
@@ -397,6 +408,7 @@ ask_yes_no() {
     prompt_step_prefix
     prompt_printf '%b%s%b %s: ' "$BOLD" "$prompt" "$RESET" "$suffix"
     read_reply reply
+    reply=$(sanitize_reply "$reply")
     reply=$(trim "$reply")
     reply=${reply,,}
 

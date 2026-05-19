@@ -173,11 +173,11 @@ Sandbox 1
 Optional steady budget example for a `10TB` monthly quota, counted as combined inbound + outbound with 10% headroom:
 
 ```torrc
-RelayBandwidthRate 1864 KBytes
-RelayBandwidthBurst 9320 KBytes
+RelayBandwidthRate 1695 KBytes
+RelayBandwidthBurst 8475 KBytes
 AccountingStart month 1 00:00
 AccountingRule sum
-AccountingMax 9216 GBytes
+AccountingMax 8381 GBytes
 ```
 
 ## Existing Relay Console

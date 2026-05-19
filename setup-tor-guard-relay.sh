@@ -1174,12 +1174,17 @@ parse_traffic_to_gbytes() {
 
   awk -v number="$number" -v unit="$unit" '
     BEGIN {
-      multiplier = 0
-      if (unit ~ /^K/) multiplier = 1 / (1024 * 1024)
-      else if (unit ~ /^M/) multiplier = 1 / 1024
-      else if (unit ~ /^G/) multiplier = 1
-      else if (unit ~ /^T/) multiplier = 1024
-      value = number * multiplier
+      bytes = 0
+      if (unit == "KIB" || unit == "KBYTE" || unit == "KBYTES") bytes = number * 1024
+      else if (unit == "MIB" || unit == "MBYTE" || unit == "MBYTES") bytes = number * 1024 * 1024
+      else if (unit == "GIB" || unit == "GBYTE" || unit == "GBYTES") bytes = number * 1024 * 1024 * 1024
+      else if (unit == "TIB" || unit == "TBYTE" || unit == "TBYTES") bytes = number * 1024 * 1024 * 1024 * 1024
+      else if (unit == "K" || unit == "KB") bytes = number * 1000
+      else if (unit == "M" || unit == "MB") bytes = number * 1000 * 1000
+      else if (unit == "G" || unit == "GB") bytes = number * 1000 * 1000 * 1000
+      else if (unit == "T" || unit == "TB") bytes = number * 1000 * 1000 * 1000 * 1000
+
+      value = bytes / (1024 * 1024 * 1024)
       if (value < 1) exit 1
       printf "%d", value
     }'

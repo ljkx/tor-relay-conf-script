@@ -344,15 +344,23 @@ apt_package_installed() {
 tor_candidate_from_tor_project() {
   command_exists apt-cache || return 1
   apt-cache policy tor 2>/dev/null | awk '
-    /^[[:space:]]+\*\*\*/ {
-      in_candidate = 1
+    $1 == "Candidate:" {
+      candidate = $2
+      next
+    }
+    candidate == "" || candidate == "(none)" {
+      next
+    }
+    $1 == "***" {
+      in_candidate = ($2 == candidate)
+      next
+    }
+    $1 ~ /^[0-9]/ && $2 ~ /^[0-9]+$/ {
+      in_candidate = ($1 == candidate)
       next
     }
     in_candidate && /deb\.torproject\.org\/torproject\.org/ {
       ok = 1
-      exit
-    }
-    in_candidate && /^[[:space:]]+[0-9]/ {
       exit
     }
     END {

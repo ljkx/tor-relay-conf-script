@@ -118,11 +118,56 @@ EOF
   rm -rf -- "$stub_dir"
 }
 
+test_tor_candidate_from_tor_project_uses_candidate_block() {
+  local stub_dir old_path
+  stub_dir=$(mktemp -d)
+  old_path=$PATH
+
+  cat > "${stub_dir}/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+cat <<'POLICY'
+tor:
+  Installed: 0.4.8.12-1~d12.bookworm+1
+  Candidate: 99.0-evil1
+  Version table:
+     99.0-evil1 1001
+       1001 http://evil.example/debian bookworm/main amd64 Packages
+ *** 0.4.8.12-1~d12.bookworm+1 100
+       500 https://deb.torproject.org/torproject.org bookworm/main amd64 Packages
+POLICY
+EOF
+  chmod +x "${stub_dir}/apt-cache"
+  PATH="${stub_dir}:${PATH}"
+
+  if tor_candidate_from_tor_project; then
+    fail "candidate-origin verifier accepted non-Tor candidate"
+  fi
+
+  cat > "${stub_dir}/apt-cache" <<'EOF'
+#!/usr/bin/env bash
+cat <<'POLICY'
+tor:
+  Installed: (none)
+  Candidate: 0.4.8.12-1~d12.bookworm+1
+  Version table:
+     0.4.8.12-1~d12.bookworm+1 500
+       500 https://deb.torproject.org/torproject.org bookworm/main amd64 Packages
+POLICY
+EOF
+  chmod +x "${stub_dir}/apt-cache"
+
+  tor_candidate_from_tor_project || fail "candidate-origin verifier rejected Tor Project candidate"
+
+  PATH=$old_path
+  rm -rf -- "$stub_dir"
+}
+
 test_version
 test_traffic_parser_and_steady_budget
 test_myfamily_helpers
 test_ipv6_validation
 test_torrc_generation
 test_ufw_inactive_detection
+test_tor_candidate_from_tor_project_uses_candidate_block
 
 printf 'ok - function tests passed\n'

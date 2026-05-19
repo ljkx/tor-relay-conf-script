@@ -4167,9 +4167,11 @@ configure_ufw_firewall() {
 
   ((DRY_RUN)) || command_exists ufw || die "ufw is not installed."
 
-  for ssh_port in $SSH_PORTS_FOR_UFW; do
-    run "Allowing SSH TCP ${ssh_port} through UFW" ufw allow "${ssh_port}/tcp" comment "SSH"
-  done
+  if [[ "$FIREWALL_STATE" != "active" ]]; then
+    for ssh_port in $SSH_PORTS_FOR_UFW; do
+      run "Allowing SSH TCP ${ssh_port} through UFW" ufw allow "${ssh_port}/tcp" comment "SSH"
+    done
+  fi
   run "Allowing TCP ${OR_PORT} through UFW" ufw allow "${OR_PORT}/tcp" comment "Tor relay ORPort"
 
   if ((ENABLE_UFW_AFTER_RULES)); then

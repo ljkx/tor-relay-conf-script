@@ -717,10 +717,8 @@ trim() {
 sanitize_reply() {
   local value=$1
 
-  value=${value//$'\e[200~'/}
-  value=${value//$'\e[201~'/}
-  value=${value//$'\r'/}
-  value=${value//$'\e'/}
+  value=$(printf '%s' "$value" | sed -E $'s/\x1B\[[0-?]*[ -\/]*[@-~]//g')
+  value=$(printf '%s' "$value" | tr -d '\000-\010\013\014\016-\037\177')
   printf '%s' "$value"
 }
 

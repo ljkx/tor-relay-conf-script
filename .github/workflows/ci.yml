@@ -14,5 +14,19 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
-      - name: Project checks
-        run: make check
+      - name: Bash syntax check
+        run: bash -n setup-tor-guard-relay.sh
+
+      - name: ShellCheck
+        run: shellcheck -S warning -e SC2034,SC2178 setup-tor-guard-relay.sh tests/test-functions.bash
+
+      - name: Function tests
+        run: |
+          bash tests/test-functions.bash
+          python3 -m py_compile scripts/render-readme-screenshots.py
+
+      - name: Smoke checks
+        run: |
+          ./setup-tor-guard-relay.sh --version
+          ./setup-tor-guard-relay.sh --help >/tmp/tor-relay-setup-help.txt
+          grep -Fq -- '--dry-run' /tmp/tor-relay-setup-help.txt
